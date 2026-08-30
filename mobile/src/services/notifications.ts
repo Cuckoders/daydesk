@@ -87,7 +87,7 @@ export async function scheduleRoutineReminders(routine: Routine, allowPermission
       content: {
         title: routine.title,
         body: 'Пора сделать небольшую паузу по плану DayDesk.',
-        data: { url: '/(tabs)' },
+        data: { url: `/routine-editor?id=${routine.id}`, routineId: routine.id },
         sound: true,
       },
       trigger: {

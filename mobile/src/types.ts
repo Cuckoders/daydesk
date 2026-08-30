@@ -137,3 +137,12 @@ export interface NewEventInput {
   reminderEnabled: boolean;
   remindBeforeMinutes: number;
 }
+
+export interface NewRoutineInput {
+  title: string;
+  time: string;
+  days: number[];
+  kind: RoutineKind;
+  remindBeforeMinutes: number;
+  enabled: boolean;
+}

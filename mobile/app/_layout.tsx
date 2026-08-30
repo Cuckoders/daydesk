@@ -40,6 +40,8 @@ export default function RootLayout() {
           options={{ presentation: 'modal', title: 'Задача', headerShown: false, gestureEnabled: true }}
         />
         <Stack.Screen name="event-editor" options={{ presentation: 'modal', title: 'Событие', headerShown: false, gestureEnabled: true }} />
+        <Stack.Screen name="routines" options={{ headerShown: false }} />
+        <Stack.Screen name="routine-editor" options={{ presentation: 'modal', title: 'Ритуал', headerShown: false, gestureEnabled: true }} />
         <Stack.Screen name="sync-settings" options={{ presentation: 'modal', headerShown: false, gestureEnabled: true }} />
       </Stack>
     </ThemeProvider>

@@ -31,7 +31,6 @@ export default function TodayScreen() {
   const syncStatus = useDayDeskStore((state) => state.syncStatus);
   const toggleTask = useDayDeskStore((state) => state.toggleTask);
   const toggleRoutine = useDayDeskStore((state) => state.toggleRoutine);
-  const enableAllRoutines = useDayDeskStore((state) => state.enableAllRoutines);
 
   const todayTasks = useMemo(
     () => tasks.filter((task) => isSameDay(task.dueAt, new Date())).sort((a, b) => a.dueAt.localeCompare(b.dueAt)),
@@ -91,7 +90,7 @@ export default function TodayScreen() {
         </View>
       </View>
 
-      <SectionHeader title="Ритм дня" actionLabel="Напоминать" onAction={() => void enableAllRoutines()} />
+      <SectionHeader title="Ритм дня" actionLabel="Настроить" onAction={() => router.push('/routines' as Href)} />
       <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.routines}>
         {routines.map((routine) => (
           <Pressable

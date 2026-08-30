@@ -3,8 +3,8 @@ import { create } from 'zustand';
 import { createJSONStorage, persist } from 'zustand/middleware';
 
 import { initialState } from '@/src/data';
-import { cancelReminder, cancelReminders, scheduleEventReminder, scheduleRoutineReminders, scheduleTaskReminder } from '@/src/services/notifications';
-import type { CalendarEvent, DayDeskState, NewEventInput, NewTaskInput, RemoteSyncChange, Routine, SyncOperation, SyncStatus, Task } from '@/src/types';
+import { cancelReminder, cancelReminders, requestReminderPermission, scheduleEventReminder, scheduleRoutineReminders, scheduleTaskReminder } from '@/src/services/notifications';
+import type { CalendarEvent, DayDeskState, NewEventInput, NewRoutineInput, NewTaskInput, RemoteSyncChange, Routine, RoutineKind, SyncOperation, SyncStatus, Task } from '@/src/types';
 import { nextDueDate, nextDueDateForDays } from '@/src/utils/date';
 
 interface DayDeskActions {
@@ -15,6 +15,9 @@ interface DayDeskActions {
   addEvent: (input: NewEventInput) => Promise<CalendarEvent>;
   updateEvent: (id: string, input: NewEventInput) => Promise<void>;
   deleteEvent: (id: string) => Promise<void>;
+  addRoutine: (input: NewRoutineInput) => Promise<Routine>;
+  updateRoutine: (id: string, input: NewRoutineInput) => Promise<void>;
+  deleteRoutine: (id: string) => Promise<void>;
   toggleRoutine: (id: string) => Promise<void>;
   enableAllRoutines: () => Promise<void>;
   setSyncStatus: (status: SyncStatus, error?: string) => void;
@@ -27,6 +30,20 @@ type DayDeskStore = DayDeskState & DayDeskActions;
 
 const id = (prefix: string) => `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 const recurringTaskId = (seriesId: string, dueAt: string) => `repeat-${seriesId.slice(0, 100)}-${new Date(dueAt).getTime().toString(36)}`;
+const routineKinds = new Set<RoutineKind>(['water', 'meal', 'break', 'focus', 'custom']);
+const routineReminderOptions = new Set([0, 5, 10, 15, 30]);
+const controlCharacters = /[\u0000-\u001f\u007f]/;
+
+const normalizeRoutineInput = (input: NewRoutineInput): NewRoutineInput => {
+  const title = input.title.trim();
+  if (!title || title.length > 100 || controlCharacters.test(title)) throw new Error('Проверьте название ритуала.');
+  if (!/^(?:[01]\d|2[0-3]):[0-5]\d$/.test(input.time)) throw new Error('Укажите время в формате ЧЧ:ММ.');
+  if (!routineKinds.has(input.kind)) throw new Error('Выберите тип ритуала.');
+  if (!routineReminderOptions.has(input.remindBeforeMinutes)) throw new Error('Выберите доступное время напоминания.');
+  const days = [...new Set(input.days)].sort((left, right) => left - right);
+  if (!days.length || days.some((day) => !Number.isInteger(day) || day < 0 || day > 6)) throw new Error('Выберите хотя бы один день недели.');
+  return { ...input, title, days };
+};
 
 const queueOperation = (entity: SyncOperation['entity'], entityId: string, operation: 'upsert' | 'delete') => ({
   id: id('sync'),
@@ -175,6 +192,48 @@ export const useDayDeskStore = create<DayDeskStore>()(
           syncQueue: enqueueLatest(state.syncQueue, queueOperation('event', eventId, 'delete')),
         }));
       },
+      addRoutine: async (input) => {
+        const normalized = normalizeRoutineInput(input);
+        const routine: Routine = {
+          ...normalized,
+          id: id('routine'),
+          updatedAt: new Date().toISOString(),
+          syncVersion: 1,
+        };
+        if (routine.enabled) routine.notificationIds = await scheduleRoutineReminders(routine);
+        set((state) => ({
+          routines: [...state.routines, routine].sort((left, right) => left.time.localeCompare(right.time)),
+          syncQueue: enqueueLatest(state.syncQueue, queueOperation('routine', routine.id, 'upsert')),
+        }));
+        return routine;
+      },
+      updateRoutine: async (routineId, input) => {
+        const normalized = normalizeRoutineInput(input);
+        const current = get().routines.find((routine) => routine.id === routineId);
+        if (!current) return;
+        await cancelReminders([current.notificationId, ...(current.notificationIds ?? [])]);
+        const updated: Routine = {
+          ...current,
+          ...normalized,
+          notificationId: undefined,
+          notificationIds: undefined,
+          updatedAt: new Date().toISOString(),
+          syncVersion: (current.syncVersion ?? 0) + 1,
+        };
+        if (updated.enabled) updated.notificationIds = await scheduleRoutineReminders(updated);
+        set((state) => ({
+          routines: state.routines.map((routine) => routine.id === routineId ? updated : routine).sort((left, right) => left.time.localeCompare(right.time)),
+          syncQueue: enqueueLatest(state.syncQueue, queueOperation('routine', routineId, 'upsert')),
+        }));
+      },
+      deleteRoutine: async (routineId) => {
+        const current = get().routines.find((routine) => routine.id === routineId);
+        await cancelReminders([current?.notificationId, ...(current?.notificationIds ?? [])]);
+        set((state) => ({
+          routines: state.routines.filter((routine) => routine.id !== routineId),
+          syncQueue: enqueueLatest(state.syncQueue, queueOperation('routine', routineId, 'delete')),
+        }));
+      },
       toggleRoutine: async (routineId) => {
         const current = get().routines.find((routine) => routine.id === routineId);
         if (!current) return;
@@ -196,6 +255,7 @@ export const useDayDeskStore = create<DayDeskStore>()(
         }));
       },
       enableAllRoutines: async () => {
+        const canSchedule = await requestReminderPermission();
         const routines = await Promise.all(get().routines.map(async (routine) => {
           await cancelReminders([routine.notificationId, ...(routine.notificationIds ?? [])]);
           const enabled: Routine = {
@@ -208,7 +268,7 @@ export const useDayDeskStore = create<DayDeskStore>()(
             updatedAt: new Date().toISOString(),
             syncVersion: (routine.syncVersion ?? 0) + 1,
           };
-          enabled.notificationIds = await scheduleRoutineReminders(enabled);
+          if (canSchedule) enabled.notificationIds = await scheduleRoutineReminders(enabled, false);
           return enabled;
         }));
         set((state) => ({
