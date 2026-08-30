@@ -1,6 +1,14 @@
 import { authenticatedRequest } from '@/src/services/sync';
 import type { MailAccount, MailContent, MailMessage } from '@/src/types';
 
+export type OAuthMailProvider = 'gmail' | 'outlook';
+
+export interface MailOAuthStart {
+  flowId: string;
+  authorizationUrl: string;
+  expiresAt: string;
+}
+
 export interface ConnectImapInput {
   label: string;
   address: string;
@@ -22,19 +30,25 @@ function readEnvelope(value: unknown) {
 }
 
 function readAccount(value: unknown): MailAccount {
-  if (!isRecord(value) || typeof value.id !== 'string' || value.provider !== 'imap' || typeof value.label !== 'string'
-    || typeof value.address !== 'string' || typeof value.host !== 'string' || value.port !== 993 || typeof value.username !== 'string'
-    || value.label.length > 80 || value.address.length > 320 || value.username.length > 320 || !hostPattern.test(value.host)
+  if (!isRecord(value) || typeof value.id !== 'string' || !uuidPattern.test(value.id) || !['imap', 'gmail', 'outlook'].includes(String(value.provider))
+    || typeof value.label !== 'string' || typeof value.address !== 'string' || value.label.length > 80 || value.address.length > 320
+    || controlCharacters.test(value.label) || !emailPattern.test(value.address)
     || (value.lastSyncedAt !== undefined && (typeof value.lastSyncedAt !== 'string' || !Number.isFinite(Date.parse(value.lastSyncedAt))))) throw new Error('Сервер вернул некорректный аккаунт');
-  return { id: value.id, provider: 'imap', label: value.label, address: value.address, host: value.host, port: 993, username: value.username,
-    color: '#167654', ...(typeof value.lastSyncedAt === 'string' ? { lastSyncedAt: value.lastSyncedAt } : {}) };
+  const provider = value.provider as MailAccount['provider'];
+  if (provider === 'imap' && (typeof value.host !== 'string' || value.port !== 993 || typeof value.username !== 'string'
+    || value.username.length > 320 || !hostPattern.test(value.host) || controlCharacters.test(value.username))) throw new Error('Сервер вернул некорректный аккаунт');
+  return { id: value.id, provider, label: value.label, address: value.address,
+    color: provider === 'gmail' ? '#D93025' : provider === 'outlook' ? '#0A64AD' : '#167654',
+    ...(provider === 'imap' ? { host: value.host as string, port: 993, username: value.username as string } : {}),
+    ...(typeof value.lastSyncedAt === 'string' ? { lastSyncedAt: value.lastSyncedAt } : {}) };
 }
 
 function readMessage(value: unknown): MailMessage {
   if (!isRecord(value) || typeof value.id !== 'string' || typeof value.accountId !== 'string' || typeof value.sender !== 'string'
     || typeof value.subject !== 'string' || typeof value.preview !== 'string' || typeof value.receivedAt !== 'string'
     || typeof value.unread !== 'boolean' || typeof value.starred !== 'boolean' || value.sender.length > 500 || value.subject.length > 1_000
-    || value.preview.length > 300 || !Number.isFinite(Date.parse(value.receivedAt))) throw new Error('Сервер вернул некорректное письмо');
+    || value.preview.length > 300 || !/^[A-Za-z0-9_-]{1,2048}$/.test(value.id) || !uuidPattern.test(value.accountId)
+    || !Number.isFinite(Date.parse(value.receivedAt))) throw new Error('Сервер вернул некорректное письмо');
   return value as unknown as MailMessage;
 }
 
@@ -68,7 +82,7 @@ export async function loadMailAccounts() {
 }
 
 export async function loadMailContent(accountId: string, messageId: string): Promise<MailContent> {
-  if (!uuidPattern.test(accountId) || !/^[1-9][0-9]{0,19}$/.test(messageId)) throw new Error('Некорректное письмо');
+  if (!uuidPattern.test(accountId) || !/^[A-Za-z0-9_-]{1,2048}$/.test(messageId)) throw new Error('Некорректное письмо');
   const data = readEnvelope(await authenticatedRequest<unknown>(`/v1/mail/messages/${accountId}/${messageId}`));
   if (typeof data.body !== 'string' || data.body.length > 200_000 || typeof data.hasAttachments !== 'boolean') throw new Error('Сервер вернул некорректное письмо');
   return { body: data.body, hasAttachments: data.hasAttachments };
@@ -77,4 +91,46 @@ export async function loadMailContent(accountId: string, messageId: string): Pro
 export async function disconnectMailAccount(accountId: string) {
   if (!uuidPattern.test(accountId)) throw new Error('Некорректный аккаунт');
   await authenticatedRequest<void>(`/v1/mail/accounts/${accountId}`, { method: 'DELETE' });
+}
+
+export async function loadMailOAuthProviders(): Promise<OAuthMailProvider[]> {
+  const data = readEnvelope(await authenticatedRequest<unknown>('/v1/mail/oauth/providers'));
+  if (!Array.isArray(data.providers) || !data.providers.every((provider) => provider === 'gmail' || provider === 'outlook')) {
+    throw new Error('Сервер вернул некорректный список OAuth-провайдеров');
+  }
+  return [...new Set(data.providers)] as OAuthMailProvider[];
+}
+
+export async function startMailOAuth(provider: OAuthMailProvider): Promise<MailOAuthStart> {
+  const data = readEnvelope(await authenticatedRequest<unknown>('/v1/mail/oauth/start', { method: 'POST', body: JSON.stringify({ provider }) }));
+  if (typeof data.flowId !== 'string' || !uuidPattern.test(data.flowId) || typeof data.authorizationUrl !== 'string'
+    || typeof data.expiresAt !== 'string' || !Number.isFinite(Date.parse(data.expiresAt))) throw new Error('Сервер вернул некорректный OAuth-запрос');
+  const authorizationUrl = new URL(data.authorizationUrl);
+  const expectedHost = provider === 'gmail' ? 'accounts.google.com' : 'login.microsoftonline.com';
+  if (authorizationUrl.protocol !== 'https:' || authorizationUrl.hostname !== expectedHost || authorizationUrl.username || authorizationUrl.password) {
+    throw new Error('Сервер вернул небезопасный адрес входа');
+  }
+  return { flowId: data.flowId, authorizationUrl: authorizationUrl.toString(), expiresAt: data.expiresAt };
+}
+
+export async function loadMailOAuthStatus(flowId: string): Promise<{ status: 'pending' | 'completed' | 'failed'; account?: MailAccount }> {
+  if (!uuidPattern.test(flowId)) throw new Error('Некорректный OAuth-запрос');
+  const data = readEnvelope(await authenticatedRequest<unknown>(`/v1/mail/oauth/status/${flowId}`));
+  if (!['pending', 'completed', 'failed'].includes(String(data.status))) throw new Error('Сервер вернул некорректный OAuth-статус');
+  if (data.status === 'completed') {
+    if (!data.account) throw new Error('Сервер не вернул подключённый аккаунт');
+    return { status: 'completed', account: readAccount(data.account) };
+  }
+  return { status: data.status as 'pending' | 'failed' };
+}
+
+export async function waitForMailOAuth(flow: MailOAuthStart, timeoutMs = 30_000): Promise<MailAccount> {
+  const deadline = Math.min(Date.parse(flow.expiresAt), Date.now() + timeoutMs);
+  while (Date.now() < deadline) {
+    const result = await loadMailOAuthStatus(flow.flowId);
+    if (result.status === 'completed' && result.account) return result.account;
+    if (result.status === 'failed') throw new Error('Вход в почту не был завершён');
+    await new Promise((resolve) => setTimeout(resolve, 1_000));
+  }
+  throw new Error('Не удалось подтвердить вход. Закройте окно браузера после сообщения DayDesk и повторите.');
 }

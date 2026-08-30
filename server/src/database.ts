@@ -60,6 +60,33 @@ export function createDatabase(databasePath: string) {
       updated_at TEXT NOT NULL,
       last_synced_at TEXT
     ) STRICT;
+
+    CREATE TABLE IF NOT EXISTS oauth_mail_accounts (
+      id TEXT PRIMARY KEY,
+      provider TEXT NOT NULL CHECK (provider IN ('gmail', 'outlook')),
+      label TEXT NOT NULL,
+      address TEXT NOT NULL,
+      encrypted_tokens TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      last_synced_at TEXT,
+      UNIQUE(provider, address)
+    ) STRICT;
+
+    CREATE TABLE IF NOT EXISTS mail_oauth_flows (
+      id TEXT PRIMARY KEY,
+      provider TEXT NOT NULL CHECK (provider IN ('gmail', 'outlook')),
+      device_id TEXT NOT NULL,
+      state_hash TEXT NOT NULL,
+      encrypted_verifier TEXT NOT NULL,
+      status TEXT NOT NULL CHECK (status IN ('pending', 'processing', 'completed', 'failed')),
+      account_id TEXT,
+      created_at TEXT NOT NULL,
+      expires_at TEXT NOT NULL,
+      FOREIGN KEY (device_id) REFERENCES devices(id)
+    ) STRICT;
+
+    CREATE INDEX IF NOT EXISTS mail_oauth_flows_expiry_idx ON mail_oauth_flows(expires_at);
   `);
   return database;
 }

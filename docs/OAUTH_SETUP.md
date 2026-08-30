@@ -2,6 +2,24 @@
 
 DayDesk использует Authorization Code Flow с PKCE, системный браузер и локальный callback. Client secret в desktop-приложении не используется. OAuth client ID не является секретом и встраивается в приложение во время сборки.
 
+Мобильное приложение завершает OAuth через отдельный DayDesk Sync web callback. Его client credentials хранятся только на сервере; в mobile-сборку они не встраиваются.
+
+## Mobile через DayDesk Sync
+
+Для mobile создайте отдельные OAuth-регистрации типа web и задайте sync-серверу:
+
+```dotenv
+DAYDESK_OAUTH_PUBLIC_URL=https://sync.example.com
+DAYDESK_GOOGLE_CLIENT_ID=...
+DAYDESK_GOOGLE_CLIENT_SECRET=...
+DAYDESK_MICROSOFT_CLIENT_ID=...
+DAYDESK_MICROSOFT_CLIENT_SECRET=...
+```
+
+В Google Cloud зарегистрируйте `https://sync.example.com/v1/mail/oauth/callback/gmail`, а в Microsoft Entra — `https://sync.example.com/v1/mail/oauth/callback/outlook`. URI должен в точности соответствовать `DAYDESK_OAUTH_PUBLIC_URL`; production-сервер обязан быть доступен по HTTPS.
+
+Mobile-поток запрашивает только чтение почты: Google `gmail.readonly`, Microsoft `User.Read`, `Mail.Read` и `offline_access`. После завершения сервер шифрует access/refresh-токены ключом `DAYDESK_MAIL_KEY`; телефон получает только метаданные подключённого аккаунта.
+
 ## Google / Gmail
 
 1. Создайте проект в [Google Cloud Console](https://console.cloud.google.com/).

@@ -4,8 +4,10 @@ import { afterEach, test } from 'node:test';
 import type { FastifyInstance } from 'fastify';
 
 import { buildApp } from '../src/app.js';
+import { registerDevice } from '../src/auth.js';
 import type { ServerConfig } from '../src/config.js';
 import { createDatabase, type DayDeskDatabase } from '../src/database.js';
+import { createMailOAuthService, type MailOAuthService, type OAuthProviderAdapter } from '../src/mail-oauth.js';
 import { createMailService, isBlockedMailAddress, type MailService, type MailTransport } from '../src/mail-service.js';
 import type { MailAccount, MailMessage } from '../src/types.js';
 
@@ -75,4 +77,95 @@ test('mail API requires device authentication and validates connection input', a
   const content = await app.inject({ method: 'GET', url: `/v1/mail/messages/${account.id}/42`, headers });
   assert.equal(content.statusCode, 200);
   assert.equal(content.json().data.body, 'Текст письма');
+});
+
+test('OAuth mail flow binds state to a device and encrypts offline credentials', async () => {
+  const database = createDatabase(':memory:');
+  databases.push(database);
+  const oauthConfig: ServerConfig = { ...config, oauthPublicUrl: 'https://sync.example.com', googleClientId: 'google-client' };
+  let receivedVerifier = '';
+  let refreshedWith = '';
+  const adapter: OAuthProviderAdapter = {
+    authorizationUrl: ({ state, challenge, redirectUri }) => {
+      const url = new URL('https://accounts.example/authorize');
+      url.search = new URLSearchParams({ state, code_challenge: challenge, redirect_uri: redirectUri }).toString();
+      return url.toString();
+    },
+    exchangeCode: async (_code, verifier) => {
+      receivedVerifier = verifier;
+      return { accessToken: 'access-secret', refreshToken: 'refresh-secret', expiresAt: new Date(Date.now() - 1_000).toISOString() };
+    },
+    refresh: async (refreshToken) => {
+      refreshedWith = refreshToken;
+      return { accessToken: 'fresh-access-secret', refreshToken, expiresAt: new Date(Date.now() + 3_600_000).toISOString() };
+    },
+    profile: async () => ({ address: 'user@gmail.com', label: 'Gmail' }),
+    messages: async (_accessToken, accountId) => [message(accountId)],
+    content: async () => ({ body: 'Строка 1\nСтрока 2', hasAttachments: true }),
+  };
+  const service = createMailOAuthService(database, oauthConfig, { gmail: adapter });
+  const device = registerDevice(database, oauthConfig, oauthConfig.setupCode, 'iPhone');
+  const started = service.start('gmail', device.id);
+  const authorization = new URL(started.authorizationUrl);
+  const state = authorization.searchParams.get('state');
+  assert.ok(state);
+  assert.equal(authorization.searchParams.get('redirect_uri'), 'https://sync.example.com/v1/mail/oauth/callback/gmail');
+  assert.ok(authorization.searchParams.get('code_challenge'));
+
+  const flow = database.prepare('SELECT state_hash AS stateHash, encrypted_verifier AS encryptedVerifier FROM mail_oauth_flows WHERE id = ?')
+    .get(started.flowId) as { stateHash: string; encryptedVerifier: string };
+  assert.equal(flow.stateHash.includes(state), false);
+  assert.equal(flow.encryptedVerifier.includes(authorization.searchParams.get('code_challenge') ?? ''), false);
+  assert.equal(await service.complete('gmail', { state, code: 'authorization-code' }), true);
+  assert.ok(receivedVerifier.length >= 43);
+  assert.throws(() => service.status(started.flowId, 'another-device'));
+
+  const status = service.status(started.flowId, device.id);
+  assert.equal(status.status, 'completed');
+  assert.equal(status.account?.address, 'user@gmail.com');
+  assert.equal('accessToken' in (status.account ?? {}), false);
+  const stored = database.prepare('SELECT encrypted_tokens AS encryptedTokens FROM oauth_mail_accounts').get() as { encryptedTokens: string };
+  assert.equal(stored.encryptedTokens.includes('access-secret'), false);
+  assert.equal(stored.encryptedTokens.includes('refresh-secret'), false);
+
+  const snapshot = await service.synchronize(status.account?.id);
+  assert.equal(refreshedWith, 'refresh-secret');
+  assert.equal(snapshot.messages[0]?.subject, 'Проверка почты');
+  assert.deepEqual(await service.content(status.account?.id ?? '', '42'), { body: 'Строка 1\nСтрока 2', hasAttachments: true });
+  assert.equal(await service.complete('gmail', { state, code: 'replay' }), false);
+});
+
+test('OAuth mail API exposes provider flow and accepts provider callback metadata', async () => {
+  const account: MailAccount = { id: '123e4567-e89b-42d3-a456-426614174001', provider: 'gmail', label: 'Gmail', address: 'user@gmail.com' };
+  const flowId = '123e4567-e89b-42d3-a456-426614174002';
+  let callbackReceived = false;
+  const oauth: MailOAuthService = {
+    configuredProviders: () => ['gmail'],
+    start: () => ({ flowId, authorizationUrl: 'https://accounts.google.com/o/oauth2/v2/auth', expiresAt: '2026-08-30T13:00:00.000Z' }),
+    complete: async (_provider, input) => { callbackReceived = input.code === 'provider-code' && Boolean(input.state); return callbackReceived; },
+    status: () => ({ status: 'completed', account }),
+    accounts: () => [account],
+    synchronize: async () => ({ accounts: [account], messages: [message(account.id)], serverTime: '2026-08-30T12:00:00.000Z' }),
+    content: async () => ({ body: 'Текст', hasAttachments: false }),
+    remove: () => undefined,
+  };
+  const imap: MailService = {
+    connectImap: async () => { throw new Error('Not used'); }, accounts: () => [],
+    synchronize: async () => ({ accounts: [], messages: [], serverTime: '2026-08-30T12:00:00.000Z' }),
+    content: async () => { throw new Error('Not used'); }, remove: () => undefined,
+  };
+  const app = await buildApp(config, { mailService: imap, mailOAuthService: oauth });
+  apps.push(app);
+  const registration = await app.inject({ method: 'POST', url: '/v1/devices/register', payload: { setupCode: config.setupCode, name: 'Android' } });
+  const device = registration.json().data as { id: string; token: string };
+  const headers = { authorization: `Bearer ${device.token}`, 'x-device-id': device.id };
+  assert.deepEqual((await app.inject({ method: 'GET', url: '/v1/mail/oauth/providers', headers })).json().data.providers, ['gmail']);
+  assert.equal((await app.inject({ method: 'POST', url: '/v1/mail/oauth/start', headers, payload: { provider: 'gmail' } })).statusCode, 201);
+  assert.equal((await app.inject({ method: 'GET', url: `/v1/mail/oauth/status/${flowId}`, headers })).json().data.account.address, 'user@gmail.com');
+  const state = `${flowId}.abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNO`;
+  const query = new URLSearchParams({ code: 'provider-code', state, scope: 'https://www.googleapis.com/auth/gmail.readonly', authuser: '0', prompt: 'consent' });
+  const callback = await app.inject({ method: 'GET', url: `/v1/mail/oauth/callback/gmail?${query}` });
+  assert.equal(callback.statusCode, 200);
+  assert.match(callback.body, /DayDesk подключён/);
+  assert.equal(callbackReceived, true);
 });

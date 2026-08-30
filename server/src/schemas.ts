@@ -177,6 +177,38 @@ export const mailMessageParamsSchema = {
   headers: authenticatedHeaders,
   params: {
     type: 'object', additionalProperties: false, required: ['accountId', 'messageId'],
-    properties: { accountId: mailAccountId, messageId: { type: 'string', pattern: '^[1-9][0-9]{0,19}$' } },
+    properties: { accountId: mailAccountId, messageId: { type: 'string', minLength: 1, maxLength: 2048, pattern: '^[A-Za-z0-9_-]+$' } },
+  },
+} as const;
+
+const oauthProvider = { type: 'string', enum: ['gmail', 'outlook'] } as const;
+
+export const startMailOAuthSchema = {
+  headers: authenticatedHeaders,
+  body: { type: 'object', additionalProperties: false, required: ['provider'], properties: { provider: oauthProvider } },
+} as const;
+
+export const mailOAuthStatusSchema = {
+  headers: authenticatedHeaders,
+  params: { type: 'object', additionalProperties: false, required: ['flowId'], properties: { flowId: mailAccountId } },
+} as const;
+
+export const mailOAuthCallbackSchema = {
+  params: { type: 'object', additionalProperties: false, required: ['provider'], properties: { provider: oauthProvider } },
+  querystring: {
+    type: 'object', additionalProperties: false,
+    properties: {
+      code: { type: 'string', minLength: 1, maxLength: 4096 },
+      state: { type: 'string', minLength: 40, maxLength: 256, pattern: '^[A-Za-z0-9._-]+$' },
+      error: { type: 'string', minLength: 1, maxLength: 200, pattern: '^[A-Za-z0-9._-]+$' },
+      error_description: { type: 'string', maxLength: 500 },
+      error_uri: { type: 'string', maxLength: 2048 },
+      scope: { type: 'string', maxLength: 4096 },
+      authuser: { type: 'string', maxLength: 3, pattern: '^[0-9]+$' },
+      prompt: { type: 'string', maxLength: 32, pattern: '^[A-Za-z0-9_-]+$' },
+      hd: { type: 'string', maxLength: 253 },
+      session_state: { type: 'string', maxLength: 200, pattern: '^[A-Za-z0-9._-]+$' },
+      client_info: { type: 'string', maxLength: 2048, pattern: '^[A-Za-z0-9._-]+$' },
+    },
   },
 } as const;

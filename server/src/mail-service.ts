@@ -51,8 +51,15 @@ export interface ConnectImapInput {
 }
 
 interface StoredConnection {
-  account: MailAccount;
+  account: ImapMailAccount;
   password: string;
+}
+
+interface ImapMailAccount extends MailAccount {
+  provider: 'imap';
+  host: string;
+  port: 993;
+  username: string;
 }
 
 export interface MailTransport {
@@ -64,7 +71,7 @@ export class MailConfigurationError extends Error {}
 export class MailConnectionError extends Error {}
 export class MailNotFoundError extends Error {}
 
-function accountFromRow(row: MailAccountRow): MailAccount {
+function accountFromRow(row: MailAccountRow): ImapMailAccount {
   return {
     id: row.id,
     provider: row.provider,
@@ -77,20 +84,20 @@ function accountFromRow(row: MailAccountRow): MailAccount {
   };
 }
 
-function encryptPassword(key: Buffer, accountId: string, password: string) {
+export function encryptSecret(key: Buffer, associatedData: string, secret: string) {
   const nonce = randomBytes(12);
   const cipher = createCipheriv('aes-256-gcm', key, nonce);
-  cipher.setAAD(Buffer.from(accountId, 'utf8'));
-  const encrypted = Buffer.concat([cipher.update(password, 'utf8'), cipher.final()]);
+  cipher.setAAD(Buffer.from(associatedData, 'utf8'));
+  const encrypted = Buffer.concat([cipher.update(secret, 'utf8'), cipher.final()]);
   return ['v1', nonce.toString('base64url'), cipher.getAuthTag().toString('base64url'), encrypted.toString('base64url')].join('.');
 }
 
-function decryptPassword(key: Buffer, accountId: string, value: string) {
+export function decryptSecret(key: Buffer, associatedData: string, value: string) {
   const [version, nonceValue, tagValue, encryptedValue, extra] = value.split('.');
   if (version !== 'v1' || !nonceValue || !tagValue || !encryptedValue || extra) throw new MailConfigurationError('Mail credential is unavailable');
   try {
     const decipher = createDecipheriv('aes-256-gcm', key, Buffer.from(nonceValue, 'base64url'));
-    decipher.setAAD(Buffer.from(accountId, 'utf8'));
+    decipher.setAAD(Buffer.from(associatedData, 'utf8'));
     decipher.setAuthTag(Buffer.from(tagValue, 'base64url'));
     return Buffer.concat([decipher.update(Buffer.from(encryptedValue, 'base64url')), decipher.final()]).toString('utf8');
   } catch {
@@ -216,7 +223,7 @@ export function createMailService(database: DayDeskDatabase, config: ServerConfi
       FROM mail_accounts WHERE id = ?
     `).get(accountId) as MailAccountRow | undefined;
     if (!row) throw new MailNotFoundError('Mail account not found');
-    return { account: accountFromRow(row), password: decryptPassword(key(), row.id, row.encryptedPassword) };
+    return { account: accountFromRow(row), password: decryptSecret(key(), row.id, row.encryptedPassword) };
   };
 
   return {
@@ -226,7 +233,7 @@ export function createMailService(database: DayDeskDatabase, config: ServerConfi
       if (accountCount.count >= ACCOUNT_LIMIT) throw new TypeError('Mail account limit reached');
       const duplicate = database.prepare('SELECT 1 FROM mail_accounts WHERE host = ? AND username = ?').get(input.host.trim().toLowerCase(), input.username.trim());
       if (duplicate) throw new TypeError('Mail account already exists');
-      const account: MailAccount = {
+      const account: ImapMailAccount = {
         id: randomUUID(), provider: 'imap', label: input.label.trim(), address: input.address.trim().toLowerCase(),
         host: input.host.trim().toLowerCase(), port: 993, username: input.username.trim(),
       };
@@ -235,12 +242,12 @@ export function createMailService(database: DayDeskDatabase, config: ServerConfi
       database.prepare(`
         INSERT INTO mail_accounts (id, provider, label, address, host, port, username, encrypted_password, created_at, updated_at, last_synced_at)
         VALUES (?, 'imap', ?, ?, ?, 993, ?, ?, ?, ?, ?)
-      `).run(account.id, account.label, account.address, account.host, account.username, encryptPassword(encryptionKey, account.id, input.password), now, now, now);
+      `).run(account.id, account.label, account.address, account.host, account.username, encryptSecret(encryptionKey, account.id, input.password), now, now, now);
       return { account: { ...account, lastSyncedAt: now }, messages };
     },
     accounts: () => readRows().map(accountFromRow),
     synchronize: async (accountId) => {
-      const connections = accountId ? [connection(accountId)] : readRows().map((row) => ({ account: accountFromRow(row), password: decryptPassword(key(), row.id, row.encryptedPassword) }));
+      const connections = accountId ? [connection(accountId)] : readRows().map((row) => ({ account: accountFromRow(row), password: decryptSecret(key(), row.id, row.encryptedPassword) }));
       const messages: MailMessage[] = [];
       const now = new Date().toISOString();
       for (const item of connections) {

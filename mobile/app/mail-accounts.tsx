@@ -9,6 +9,12 @@ import { disconnectMailAccount, loadMailAccounts, synchronizeMail } from '@/src/
 import { useDayDeskStore } from '@/src/store/useDayDeskStore';
 import { useAppColors } from '@/src/theme';
 
+const providerDetails = {
+  gmail: { icon: 'logo-google' as const, color: '#D93025', description: 'Gmail · OAuth 2.0' },
+  outlook: { icon: 'logo-microsoft' as const, color: '#0A64AD', description: 'Outlook · OAuth 2.0' },
+  imap: { icon: 'server-outline' as const, color: '#167654', description: 'IMAP · TLS 993' },
+};
+
 export default function MailAccountsScreen() {
   const colors = useAppColors();
   const router = useRouter();
@@ -35,7 +41,7 @@ export default function MailAccountsScreen() {
     } finally { setWorking(false); }
   };
 
-  const confirmDelete = (accountId: string, address: string) => Alert.alert('Отключить аккаунт?', `Пароль приложения для ${address} будет безвозвратно удалён с сервера.`, [
+  const confirmDelete = (accountId: string, address: string) => Alert.alert('Отключить аккаунт?', `Учётные данные ${address} будут безвозвратно удалены с DayDesk Sync.`, [
     { text: 'Отмена', style: 'cancel' },
     { text: 'Отключить', style: 'destructive', onPress: () => void disconnectMailAccount(accountId).then(() => removeLocal(accountId)).catch((error) => Alert.alert('Не удалось отключить', error instanceof Error ? error.message : 'Попробуйте ещё раз.')) },
   ]);
@@ -44,9 +50,9 @@ export default function MailAccountsScreen() {
     <View style={[styles.navigation, { borderBottomColor: colors.border }]}><Pressable accessibilityLabel="Назад" accessibilityRole="button" onPress={() => router.back()} style={styles.navButton}><Ionicons name="chevron-back" size={26} color={colors.text} /></Pressable><Text style={[styles.navTitle, { color: colors.text }]}>Почтовые аккаунты</Text><Pressable accessibilityLabel="Обновить все аккаунты" accessibilityRole="button" disabled={working || !accounts.length} onPress={() => void refresh()} style={styles.navButton}><Ionicons name="refresh" size={22} color={working ? colors.textMuted : colors.primary} /></Pressable></View>
     <FlatList
       contentContainerStyle={styles.content} data={accounts} keyExtractor={(item) => item.id} ItemSeparatorComponent={() => <View style={styles.separator} />}
-      ListHeaderComponent={<View><View style={[styles.security, { backgroundColor: colors.primarySoft }]}><Ionicons name="shield-checkmark-outline" size={23} color={colors.primary} /><Text style={[styles.securityText, { color: colors.textMuted }]}>Пароль передаётся серверу по защищённому соединению, шифруется AES-256-GCM и никогда не сохраняется на телефоне.</Text></View><Text style={[styles.sectionTitle, { color: colors.text }]}>Подключено</Text></View>}
-      ListEmptyComponent={<View style={[styles.empty, { backgroundColor: colors.surface }]}><Ionicons name="at-outline" size={34} color={colors.textMuted} /><Text style={[styles.emptyTitle, { color: colors.text }]}>Нет аккаунтов</Text><Text style={[styles.emptyText, { color: colors.textMuted }]}>Поддерживаются Yandex, Mail.ru, iCloud, Gmail с паролем приложения и другие IMAP-серверы.</Text></View>}
-      renderItem={({ item }) => <View style={[styles.card, { backgroundColor: colors.surface, borderColor: colors.border }]}><View style={[styles.icon, { backgroundColor: colors.primarySoft }]}><Ionicons name="server-outline" size={22} color={colors.primary} /></View><View style={styles.copy}><Text numberOfLines={1} style={[styles.label, { color: colors.text }]}>{item.label}</Text><Text numberOfLines={1} style={[styles.address, { color: colors.textMuted }]}>{item.address}</Text><Text numberOfLines={1} style={[styles.host, { color: colors.textMuted }]}>{item.host}:993</Text></View><Pressable accessibilityLabel={`Отключить ${item.address}`} accessibilityRole="button" onPress={() => confirmDelete(item.id, item.address)} style={styles.deleteButton}><Ionicons name="trash-outline" size={20} color={colors.danger} /></Pressable></View>}
+      ListHeaderComponent={<View><View style={[styles.security, { backgroundColor: colors.primarySoft }]}><Ionicons name="shield-checkmark-outline" size={23} color={colors.primary} /><Text style={[styles.securityText, { color: colors.textMuted }]}>OAuth-токены и IMAP-пароли шифруются AES-256-GCM на DayDesk Sync и не сохраняются на телефоне.</Text></View><Text style={[styles.sectionTitle, { color: colors.text }]}>Подключено</Text></View>}
+      ListEmptyComponent={<View style={[styles.empty, { backgroundColor: colors.surface }]}><Ionicons name="at-outline" size={34} color={colors.textMuted} /><Text style={[styles.emptyTitle, { color: colors.text }]}>Нет аккаунтов</Text><Text style={[styles.emptyText, { color: colors.textMuted }]}>Gmail и Outlook подключаются через OAuth. Yandex, Mail.ru, iCloud и другие серверы — через IMAP.</Text></View>}
+      renderItem={({ item }) => { const details = providerDetails[item.provider]; return <View style={[styles.card, { backgroundColor: colors.surface, borderColor: colors.border }]}><View style={[styles.icon, { backgroundColor: `${details.color}18` }]}><Ionicons name={details.icon} size={22} color={details.color} /></View><View style={styles.copy}><Text numberOfLines={1} style={[styles.label, { color: colors.text }]}>{item.label}</Text><Text numberOfLines={1} style={[styles.address, { color: colors.textMuted }]}>{item.address}</Text><Text numberOfLines={1} style={[styles.host, { color: colors.textMuted }]}>{item.provider === 'imap' && item.host ? `${item.host}:993` : details.description}</Text></View><Pressable accessibilityLabel={`Отключить ${item.address}`} accessibilityRole="button" onPress={() => confirmDelete(item.id, item.address)} style={styles.deleteButton}><Ionicons name="trash-outline" size={20} color={colors.danger} /></Pressable></View>; }}
       showsVerticalScrollIndicator={false}
     />
     <FloatingAddButton label="Добавить почту" onPress={() => router.push('/mail-account-editor' as Href)} />

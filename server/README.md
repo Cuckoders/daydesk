@@ -20,6 +20,23 @@ npm run dev
 
 Храните резервную копию `DAYDESK_MAIL_KEY` отдельно от базы. После его потери сохранённые пароли почты нельзя расшифровать — аккаунты потребуется подключить заново.
 
+Для OAuth-подключения Gmail и Outlook из мобильного приложения задайте публичный HTTPS origin сервера и credentials провайдеров:
+
+```dotenv
+DAYDESK_OAUTH_PUBLIC_URL=https://sync.example.com
+DAYDESK_GOOGLE_CLIENT_ID=...
+DAYDESK_GOOGLE_CLIENT_SECRET=...
+DAYDESK_MICROSOFT_CLIENT_ID=...
+DAYDESK_MICROSOFT_CLIENT_SECRET=...
+```
+
+Зарегистрируйте точные web redirect URI:
+
+- `https://sync.example.com/v1/mail/oauth/callback/gmail` в Google Cloud;
+- `https://sync.example.com/v1/mail/oauth/callback/outlook` в Microsoft Entra.
+
+Mobile-client не получает client secret или почтовые токены: Authorization Code Flow с PKCE завершается на sync-сервере. Для локальной разработки HTTP разрешён только на `localhost`, `127.0.0.1` и `::1`.
+
 По умолчанию сервер слушает только `127.0.0.1:4310`. Для телефона в локальной сети укажите IP интерфейса через `DAYDESK_HOST` и используйте HTTPS reverse proxy перед любым доступом из интернета.
 
 ## Протокол
@@ -27,6 +44,9 @@ npm run dev
 - `POST /v1/devices/register` — однократная регистрация по setup-коду;
 - `POST /v1/sync` — push/pull батч до 500 изменений задач, локальных событий и ритуалов;
 - `GET /v1/mail/accounts` — список подключённых почтовых аккаунтов без секретов;
+- `GET /v1/mail/oauth/providers` — доступные OAuth-провайдеры;
+- `POST /v1/mail/oauth/start` и `GET /v1/mail/oauth/status/:flowId` — запуск и привязанная к устройству проверка входа;
+- `GET /v1/mail/oauth/callback/:provider` — одноразовое завершение OAuth-кода на сервере;
 - `POST /v1/mail/accounts/imap` — проверка TLS-подключения и сохранение зашифрованного пароля приложения;
 - `POST /v1/mail/sync` — получение последних 50 писем каждого аккаунта;
 - `GET /v1/mail/messages/:accountId/:messageId` — безопасное получение текстового содержимого письма;
@@ -36,7 +56,9 @@ npm run dev
 
 Device-token возвращается один раз. В SQLite сохраняется только его SHA-256 хеш. Все сущности разрешают конфликты по `updatedAt`, при равном времени — детерминированно по ID устройства. Удаления сохраняются как tombstones.
 
-IMAP работает только через TLS на порту 993. Пароль шифруется AES-256-GCM с уникальным nonce и привязкой к ID аккаунта. По умолчанию сервер отклоняет loopback, link-local, private и зарезервированные адреса после DNS-разрешения; корпоративные IMAP-серверы в LAN разрешаются только явным `DAYDESK_ALLOW_PRIVATE_MAIL_HOSTS=true`. Тела писем не кэшируются сервером и возвращаются только как обычный текст с ограничением размера.
+IMAP работает только через TLS на порту 993. Пароль шифруется AES-256-GCM с уникальным nonce и привязкой к ID аккаунта. По умолчанию сервер отклоняет loopback, link-local, private и зарезервированные адреса после DNS-разрешения; корпоративные IMAP-серверы в LAN разрешаются только явным `DAYDESK_ALLOW_PRIVATE_MAIL_HOSTS=true`.
+
+OAuth использует PKCE S256 и случайный `state`; в базе хранится только SHA-256 `state`, а verifier очищается после callback. Access/refresh-токены шифруются тем же `DAYDESK_MAIL_KEY`, статус входа доступен только начавшему его устройству. Запрашивается доступ только на чтение почты: Gmail `gmail.readonly`, Microsoft `User.Read Mail.Read` и `offline_access`. Тела писем не кэшируются сервером и возвращаются только как обычный текст с ограничением размера.
 
 ## Проверка
 

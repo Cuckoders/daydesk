@@ -93,12 +93,12 @@ export interface DeviceRecord {
 
 export interface MailAccount {
   id: string;
-  provider: 'imap';
+  provider: 'imap' | 'gmail' | 'outlook';
   label: string;
   address: string;
-  host: string;
-  port: 993;
-  username: string;
+  host?: string;
+  port?: 993;
+  username?: string;
   lastSyncedAt?: string;
 }
 
