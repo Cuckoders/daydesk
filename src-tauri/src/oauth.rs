@@ -1314,11 +1314,11 @@ mod tests {
             )
             .unwrap();
         stream
-            .shutdown(std::net::Shutdown::Write)
-            .expect("finish callback request");
-        stream
             .set_read_timeout(Some(Duration::from_secs(2)))
             .expect("set response timeout");
+        stream
+            .shutdown(std::net::Shutdown::Write)
+            .expect("finish callback request");
         let mut response = [0_u8; 1_024];
         let count = stream.read(&mut response).expect("read callback response");
         assert!(String::from_utf8_lossy(&response[..count]).contains("200 OK"));
