@@ -3,7 +3,7 @@ import * as Sharing from 'expo-sharing';
 
 import { authenticatedRequest } from '@/src/services/sync';
 import { recordMailSnapshot } from '@/src/services/mail-checkpoint';
-import type { IncomingMailAttachment, MailAccount, MailContent, MailFolder, MailMessage, OutgoingMailAttachment, OutgoingMailInput } from '@/src/types';
+import type { CalendarInvitation, IncomingMailAttachment, MailAccount, MailContent, MailFolder, MailMessage, OutgoingMailAttachment, OutgoingMailInput } from '@/src/types';
 
 export type OAuthMailProvider = 'gmail' | 'outlook';
 
@@ -144,6 +144,42 @@ export async function shareMailAttachment(accountId: string, messageId: string, 
     bytes.fill(0);
     if (file.exists) file.delete();
   }
+}
+
+function validDateOnly(value: unknown): value is string {
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const date = new Date(`${value}T00:00:00.000Z`);
+  return Number.isFinite(date.getTime()) && date.toISOString().slice(0, 10) === value;
+}
+
+function validIsoTimestamp(value: unknown): value is string {
+  if (typeof value !== 'string') return false;
+  const time = Date.parse(value);
+  return Number.isFinite(time) && new Date(time).toISOString() === value;
+}
+
+export function isCalendarInvitation(attachment: IncomingMailAttachment) {
+  return attachment.mimeType.toLowerCase() === 'text/calendar' || attachment.name.toLowerCase().endsWith('.ics');
+}
+
+export async function loadCalendarInvitation(accountId: string, messageId: string, folder: MailFolder, expected: IncomingMailAttachment): Promise<CalendarInvitation> {
+  if (!uuidPattern.test(accountId) || !messageIdPattern.test(messageId) || !incomingAttachmentIdPattern.test(expected.id)
+    || !expected.downloadable || expected.size < 1 || expected.size > 256 * 1024 || !isCalendarInvitation(expected)) {
+    throw new Error('Это приглашение нельзя импортировать');
+  }
+  const data = readEnvelope(await authenticatedRequest<unknown>(`/v1/mail/messages/${accountId}/${messageId}/attachments/${expected.id}/invitation?folder=${folder}`, { cache: 'no-store' }));
+  if (typeof data.title !== 'string' || !data.title.trim() || data.title.length > 300 || controlCharacters.test(data.title)
+    || !validIsoTimestamp(data.startsAt) || !validIsoTimestamp(data.endsAt) || Date.parse(data.endsAt) <= Date.parse(data.startsAt)
+    || Date.parse(data.endsAt) - Date.parse(data.startsAt) > 31 * 86_400_000 || typeof data.allDay !== 'boolean'
+    || (data.location !== undefined && (typeof data.location !== 'string' || data.location.length > 500 || controlCharacters.test(data.location)))) {
+    throw new Error('Сервер вернул некорректное приглашение');
+  }
+  if (data.allDay) {
+    if (!validDateOnly(data.allDayStartDate) || !validDateOnly(data.allDayEndDate) || data.allDayEndDate <= data.allDayStartDate) {
+      throw new Error('Сервер вернул некорректное приглашение');
+    }
+  } else if (data.allDayStartDate !== undefined || data.allDayEndDate !== undefined) throw new Error('Сервер вернул некорректное приглашение');
+  return data as unknown as CalendarInvitation;
 }
 
 export async function disconnectMailAccount(accountId: string) {

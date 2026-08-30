@@ -4,7 +4,8 @@ import { useLocalSearchParams, useRouter } from 'expo-router';
 import { ActivityIndicator, Alert, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
-import { loadMailContent, shareMailAttachment } from '@/src/services/mail';
+import { createTransientEventDraft } from '@/src/services/event-draft';
+import { isCalendarInvitation, loadCalendarInvitation, loadMailContent, shareMailAttachment } from '@/src/services/mail';
 import { useDayDeskStore } from '@/src/store/useDayDeskStore';
 import { useAppColors } from '@/src/theme';
 import type { IncomingMailAttachment, MailContent, MailFolder } from '@/src/types';
@@ -28,6 +29,17 @@ export default function MailReaderScreen() {
     catch (reason) { Alert.alert('Не удалось открыть вложение', reason instanceof Error ? reason.message : 'Попробуйте ещё раз.'); }
     finally { setDownloading(undefined); }
   };
+  const importInvitation = async (attachment: IncomingMailAttachment) => {
+    if (!message || downloading) return;
+    setDownloading(attachment.id);
+    try {
+      const invitation = await loadCalendarInvitation(message.accountId, message.id, folder, attachment);
+      const draftId = createTransientEventDraft({ ...invitation, source: 'mail-invitation' });
+      router.push({ pathname: '/event-editor', params: { draftId } } as never);
+    } catch (reason) {
+      Alert.alert('Не удалось добавить встречу', reason instanceof Error ? reason.message : 'Проверьте приглашение и попробуйте ещё раз.');
+    } finally { setDownloading(undefined); }
+  };
 
   useEffect(() => {
     if (!message || !params.accountId || !params.messageId) return;
@@ -43,7 +55,13 @@ export default function MailReaderScreen() {
       <View style={styles.senderRow}><View style={[styles.avatar, { backgroundColor: colors.primarySoft }]}><Text style={[styles.avatarText, { color: colors.primary }]}>{message.sender.slice(0, 1).toUpperCase()}</Text></View><View style={styles.senderCopy}><Text style={[styles.sender, { color: colors.text }]}>{message.sender}</Text><Text style={[styles.date, { color: colors.textMuted }]}>{formatLongDate(new Date(message.receivedAt))}, {formatTime(message.receivedAt)}</Text></View>{message.starred ? <Ionicons name="star" size={20} color={colors.warning} /> : null}</View>
       <Text style={[styles.subject, { color: colors.text }]}>{message.subject}</Text>
       <View style={[styles.divider, { backgroundColor: colors.border }]} />
-      {loading ? <View style={styles.loading}><ActivityIndicator color={colors.primary} /><Text style={[styles.status, { color: colors.textMuted }]}>Загружаем содержимое…</Text></View> : error ? <View style={[styles.errorBox, { borderColor: colors.danger }]}><Ionicons name="alert-circle-outline" size={22} color={colors.danger} /><View style={styles.errorCopy}><Text style={[styles.errorTitle, { color: colors.danger }]}>Не удалось загрузить письмо</Text><Text style={[styles.errorText, { color: colors.textMuted }]}>{error}</Text></View></View> : <><Text selectable style={[styles.body, { color: colors.text }]}>{content?.body || message.preview || 'В письме нет текстового содержимого.'}</Text>{content?.attachments.length ? <View style={styles.attachments}><Text style={[styles.attachmentsTitle, { color: colors.text }]}>Вложения · {content.attachments.length}</Text>{content.attachments.map((attachment) => <Pressable key={attachment.id} accessibilityLabel={`${attachment.downloadable ? 'Открыть' : 'Недоступно'} вложение ${attachment.name}`} accessibilityRole="button" accessibilityState={{ disabled: !attachment.downloadable || Boolean(downloading) }} disabled={!attachment.downloadable || Boolean(downloading)} onPress={() => void download(attachment)} style={[styles.attachment, { backgroundColor: colors.surfaceRaised }]}><View style={[styles.attachmentIcon, { backgroundColor: colors.primarySoft }]}><Ionicons name="document-attach-outline" size={22} color={colors.primary} /></View><View style={styles.attachmentCopy}><Text numberOfLines={1} style={[styles.attachmentName, { color: colors.text }]}>{attachment.name}</Text><Text style={[styles.attachmentMeta, { color: colors.textMuted }]}>{attachment.size < 1024 * 1024 ? `${Math.max(1, Math.round(attachment.size / 1024))} КБ` : `${(attachment.size / 1024 / 1024).toFixed(1)} МБ`}{attachment.downloadable ? '' : ' · больше лимита 2 МБ'}</Text></View>{downloading === attachment.id ? <ActivityIndicator color={colors.primary} /> : <Ionicons name={attachment.downloadable ? 'share-outline' : 'lock-closed-outline'} size={21} color={colors.textMuted} />}</Pressable>)}</View> : null}</>}
+      {loading ? <View style={styles.loading}><ActivityIndicator color={colors.primary} /><Text style={[styles.status, { color: colors.textMuted }]}>Загружаем содержимое…</Text></View> : error ? <View style={[styles.errorBox, { borderColor: colors.danger }]}><Ionicons name="alert-circle-outline" size={22} color={colors.danger} /><View style={styles.errorCopy}><Text style={[styles.errorTitle, { color: colors.danger }]}>Не удалось загрузить письмо</Text><Text style={[styles.errorText, { color: colors.textMuted }]}>{error}</Text></View></View> : <><Text selectable style={[styles.body, { color: colors.text }]}>{content?.body || message.preview || 'В письме нет текстового содержимого.'}</Text>{content?.attachments.length ? <View style={styles.attachments}><Text style={[styles.attachmentsTitle, { color: colors.text }]}>Вложения · {content.attachments.length}</Text>{content.attachments.map((attachment) => {
+        const invitation = isCalendarInvitation(attachment);
+        const available = attachment.downloadable && (!invitation || attachment.size <= 256 * 1024);
+        const meta = attachment.size < 1024 * 1024 ? `${Math.max(1, Math.round(attachment.size / 1024))} КБ` : `${(attachment.size / 1024 / 1024).toFixed(1)} МБ`;
+        const limit = invitation ? ' · приглашение больше 256 КБ' : ' · больше лимита 2 МБ';
+        return <Pressable key={attachment.id} accessibilityLabel={`${available ? invitation ? 'Добавить встречу из' : 'Открыть' : 'Недоступно'} вложение ${attachment.name}`} accessibilityRole="button" accessibilityState={{ disabled: !available || Boolean(downloading) }} disabled={!available || Boolean(downloading)} onPress={() => void (invitation ? importInvitation(attachment) : download(attachment))} style={[styles.attachment, { backgroundColor: colors.surfaceRaised }]}><View style={[styles.attachmentIcon, { backgroundColor: colors.primarySoft }]}><Ionicons name={invitation ? 'calendar-outline' : 'document-attach-outline'} size={22} color={colors.primary} /></View><View style={styles.attachmentCopy}><Text numberOfLines={1} style={[styles.attachmentName, { color: colors.text }]}>{attachment.name}</Text><Text style={[styles.attachmentMeta, { color: colors.textMuted }]}>{meta}{available ? invitation ? ' · Добавить встречу' : '' : limit}</Text></View>{downloading === attachment.id ? <ActivityIndicator color={colors.primary} /> : <Ionicons name={available ? invitation ? 'add-circle-outline' : 'share-outline' : 'lock-closed-outline'} size={21} color={colors.textMuted} />}</Pressable>;
+      })}</View> : null}</>}
       <View style={[styles.security, { backgroundColor: colors.primarySoft }]}><Ionicons name="shield-checkmark-outline" size={21} color={colors.primary} /><Text style={[styles.securityText, { color: colors.textMuted }]}>DayDesk показывает только обычный текст. HTML, скрипты, внешние изображения и пиксели отслеживания не запускаются.</Text></View>
     </ScrollView>}
   </SafeAreaView>;

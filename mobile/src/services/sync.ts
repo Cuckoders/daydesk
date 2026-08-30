@@ -109,6 +109,7 @@ async function request<T>(url: string, init: RequestInit, timeoutMs = REQUEST_TI
       if (response.status === 401) throw new Error('Сервер отклонил авторизацию устройства');
       if (response.status === 429) throw new Error('Слишком много запросов. Попробуйте позже');
       if (response.status === 404) throw new Error('Запрошенные данные не найдены');
+      if (response.status === 400 && url.includes('/attachments/') && url.includes('/invitation')) throw new Error('Приглашение повреждено или пока не поддерживается');
       if (response.status === 422) throw new Error(url.endsWith('/v1/mail/send') ? 'Почтовый сервис отклонил отправку. OAuth-аккаунт может потребовать переподключения' : 'Почтовый сервер отклонил подключение');
       if (response.status === 503) throw new Error('Почтовый коннектор не настроен на сервере');
       throw new Error('Сервер синхронизации временно недоступен');

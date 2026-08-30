@@ -103,6 +103,16 @@ export interface MailContent {
   attachments: IncomingMailAttachment[];
 }
 
+export interface CalendarInvitation {
+  title: string;
+  startsAt: string;
+  endsAt: string;
+  location?: string;
+  allDay: boolean;
+  allDayStartDate?: string;
+  allDayEndDate?: string;
+}
+
 export interface OutgoingMailAttachment {
   token: string;
   name: string;
@@ -174,6 +184,9 @@ export interface NewEventInput {
   location?: string;
   reminderEnabled: boolean;
   remindBeforeMinutes: number;
+  allDay?: boolean;
+  allDayStartDate?: string;
+  allDayEndDate?: string;
 }
 
 export interface NewRoutineInput {

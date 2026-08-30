@@ -57,12 +57,13 @@ test('IMAP password is encrypted at rest and never returned with account data', 
 test('mail API requires device authentication and validates connection input', async () => {
   const account: MailAccount = { id: '123e4567-e89b-12d3-a456-426614174000', provider: 'imap', label: 'Работа', address: 'user@example.com', host: 'imap.example.com', port: 993, username: 'user@example.com' };
   let synchronizedFolder = 'inbox';
+  let incomingAttachment = { id: '1', name: 'note.txt', mimeType: 'text/plain', size: 5, downloadable: true, content: Buffer.from('hello') };
   const fake: MailService = {
     connectImap: async () => ({ account, messages: [message(account.id)] }),
     accounts: () => [account],
     synchronize: async (_accountId, folder = 'inbox') => { synchronizedFolder = folder; return { accounts: [account], messages: [{ ...message(account.id), folder }], serverTime: '2026-08-30T12:00:00.000Z' }; },
     content: async () => ({ body: 'Текст письма', hasAttachments: false, attachments: [] }),
-    attachment: async () => ({ id: '1', name: 'note.txt', mimeType: 'text/plain', size: 5, downloadable: true, content: Buffer.from('hello') }),
+    attachment: async () => ({ ...incomingAttachment, content: Buffer.from(incomingAttachment.content) }),
     send: async () => undefined,
     remove: () => undefined,
   };
@@ -90,6 +91,12 @@ test('mail API requires device authentication and validates connection input', a
   assert.equal(attachment.statusCode, 200);
   assert.equal(attachment.headers['cache-control'], 'no-store');
   assert.deepEqual(attachment.json().data, { id: '1', name: 'note.txt', mimeType: 'text/plain', size: 5, data: Buffer.from('hello').toString('base64') });
+  const invitationSource = Buffer.from('BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:api-1\r\nDTSTART:20260901T120000Z\r\nDTEND:20260901T130000Z\r\nSUMMARY:API meeting\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n');
+  incomingAttachment = { id: '1', name: 'invite.ics', mimeType: 'text/calendar', size: invitationSource.length, downloadable: true, content: invitationSource };
+  const invitation = await app.inject({ method: 'GET', url: `/v1/mail/messages/${account.id}/42/attachments/1/invitation`, headers });
+  assert.equal(invitation.statusCode, 200);
+  assert.equal(invitation.headers['cache-control'], 'no-store');
+  assert.deepEqual(invitation.json().data, { title: 'API meeting', startsAt: '2026-09-01T12:00:00.000Z', endsAt: '2026-09-01T13:00:00.000Z', allDay: false });
   assert.equal((await app.inject({ method: 'GET', url: `/v1/mail/messages/${account.id}/42/attachments/0`, headers })).statusCode, 400);
 });
 

@@ -4,6 +4,7 @@ import rateLimit from '@fastify/rate-limit';
 import Fastify from 'fastify';
 
 import { AuthenticationError, authenticateDevice, registerDevice } from './auth.js';
+import { InvalidCalendarInvitationError, parseCalendarInvitation } from './calendar-invitation.js';
 import type { ServerConfig } from './config.js';
 import { createDatabase } from './database.js';
 import { createMailAttachmentRegistry, MailAttachmentNotFoundError, type AttachmentUploadInput, type MailAttachmentRegistry } from './mail-compose.js';
@@ -131,6 +132,20 @@ export async function buildApp(config: ServerConfig, dependencies: { mailService
     } finally { attachment.content.fill(0); }
   });
 
+  app.get<{ Params: { accountId: string; messageId: string; attachmentId: string }; Querystring: { folder?: MailFolder } }>('/v1/mail/messages/:accountId/:messageId/attachments/:attachmentId/invitation', {
+    schema: mailAttachmentParamsSchema,
+    config: { rateLimit: { max: 10, timeWindow: '1 minute' } },
+  }, async (request, reply) => {
+    authenticateDevice(database, request);
+    const folder = request.query.folder ?? 'inbox';
+    const attachment = mailService.accounts().some((account) => account.id === request.params.accountId)
+      ? await mailService.attachment(request.params.accountId, request.params.messageId, request.params.attachmentId, folder)
+      : await mailOAuthService.attachment(request.params.accountId, request.params.messageId, request.params.attachmentId);
+    try {
+      return reply.header('cache-control', 'no-store').send({ status: 'success', data: parseCalendarInvitation(attachment) });
+    } finally { attachment.content.fill(0); }
+  });
+
   app.post<{ Body: AttachmentUploadInput }>('/v1/mail/attachments', {
     schema: uploadMailAttachmentSchema,
     bodyLimit: 2_900_000,
@@ -177,6 +192,7 @@ export async function buildApp(config: ServerConfig, dependencies: { mailService
       return reply.code(401).send({ status: 'error', message: 'Authentication failed' });
     }
     if (error instanceof MailNotFoundError || error instanceof MailAttachmentNotFoundError) return reply.code(404).send({ status: 'error', message: 'Mail resource not found' });
+    if (error instanceof InvalidCalendarInvitationError) return reply.code(400).send({ status: 'error', message: 'Invalid calendar invitation' });
     if (error instanceof MailConnectionError) return reply.code(422).send({ status: 'error', message: 'Mail connection failed' });
     if (error instanceof MailConfigurationError) return reply.code(503).send({ status: 'error', message: 'Mail connector unavailable' });
     if ((error as { validation?: unknown }).validation || error instanceof TypeError) {
