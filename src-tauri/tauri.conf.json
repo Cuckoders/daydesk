@@ -1,0 +1,35 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "DayDesk",
+  "version": "0.1.0",
+  "identifier": "ru.daydesk.desktop",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "DayDesk",
+        "width": 1180,
+        "height": 780,
+        "minWidth": 850,
+        "minHeight": 620,
+        "center": true,
+        "backgroundColor": "#f8f8fd"
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; connect-src ipc: http://ipc.localhost; img-src 'self' asset: data:; style-src 'self' 'unsafe-inline'"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "publisher": "DayDesk Team",
+    "shortDescription": "Задачи, встречи и почта в одном месте",
+    "longDescription": "DayDesk объединяет задачи, напоминания, календарь, почту и виджеты рабочего стола."
+  }
+}

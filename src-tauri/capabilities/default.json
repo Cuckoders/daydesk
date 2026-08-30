@@ -1,0 +1,12 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Разрешения основного окна и виджета DayDesk",
+  "windows": ["main", "agenda-widget"],
+  "permissions": [
+    "core:default",
+    "core:webview:allow-create-webview-window",
+    "dialog:allow-open",
+    "notification:default"
+  ]
+}

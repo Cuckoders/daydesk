@@ -1,0 +1,37 @@
+[package]
+name = "daydesk"
+version = "0.1.0"
+description = "Спокойный центр задач, календаря и почты для Windows и macOS"
+authors = ["DayDesk"]
+edition = "2021"
+
+[lib]
+name = "daydesk_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+aes-gcm = { version = "0.10.3", features = ["std", "getrandom", "zeroize"] }
+base64 = "0.22"
+chrono = "0.4"
+html2text = "0.17.1"
+imap = "2.4.1"
+keyring = { version = "3.6.3", default-features = false, features = ["apple-native", "windows-native"] }
+lettre = { version = "0.11.23", default-features = false, features = ["builder", "native-tls", "smtp-transport"] }
+mail-parser = "0.11.8"
+mime_guess = "2"
+native-tls = "0.2"
+open = "5"
+rand = "0.8"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tauri = { version = "2", features = ["macos-private-api"] }
+tauri-plugin-notification = "2"
+tauri-plugin-dialog = "2.7.2"
+url = "2"
+zeroize = { version = "1.8", features = ["derive"] }
