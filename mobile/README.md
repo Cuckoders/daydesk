@@ -1,0 +1,34 @@
+# DayDesk Mobile
+
+Мобильный клиент DayDesk для iPhone, iPad и Android на Expo + React Native.
+
+## Уже работает
+
+- обзор дня, задачи, календарь, ритм дня и экран единой почты;
+- создание, редактирование, завершение и удаление задач;
+- приоритеты, категории, сроки и повтор по дням/будням/неделям;
+- локальные системные напоминания о задачах и ежедневных ритуалах;
+- offline-first хранение в AsyncStorage и очередь изменений для будущей синхронизации;
+- светлая и тёмная темы, 48px зоны касания, VoiceOver/TalkBack labels;
+- deep link из уведомления сразу в нужную задачу.
+
+OAuth-токены Gmail/Outlook и пароли IMAP в AsyncStorage не сохраняются. После подключения общего backend-коннектора они должны храниться через `expo-secure-store`/Keychain/EncryptedSharedPreferences.
+
+## Запуск
+
+```bash
+cd mobile
+npm install
+npm run ios
+# или
+npm run android
+```
+
+Для локальных уведомлений на современных версиях Expo используйте development build; Expo Go поддерживает модуль уведомлений с ограничениями.
+
+Проверка без CI:
+
+```bash
+npx tsc --noEmit
+npx expo export --platform web
+```

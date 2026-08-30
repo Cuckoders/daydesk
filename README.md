@@ -3,10 +3,10 @@
 [![CI](https://github.com/Cuckoders/daydesk/actions/workflows/ci.yml/badge.svg)](https://github.com/Cuckoders/daydesk/actions/workflows/ci.yml)
 ![Tauri](https://img.shields.io/badge/Tauri-2-24c8db)
 ![React](https://img.shields.io/badge/React-19-61dafb)
-![Platforms](https://img.shields.io/badge/platforms-Windows%20%7C%20macOS-6857eb)
+![Platforms](https://img.shields.io/badge/platforms-Windows%20%7C%20macOS%20%7C%20iOS%20%7C%20Android-167654)
 ![Rust tests](https://img.shields.io/badge/Rust_tests-40%2F40-success)
 
-Нативное desktop-приложение для Windows и macOS: задачи, встречи, привычные перерывы, единая почта и виджеты рабочего стола. Основа — Tauri 2, React 19 и TypeScript.
+DayDesk для Windows, macOS, iOS и Android: задачи, встречи, привычные перерывы, единая почта и виджеты. Desktop-клиент работает на Tauri 2, мобильный — на Expo и React Native.
 
 > Native Windows and macOS productivity workspace with tasks, reminders, desktop widgets, a unified inbox, encrypted local mail cache, OAuth/IMAP integrations and secure email attachments.
 
@@ -38,6 +38,15 @@
 ```bash
 npm install
 npm run desktop:dev
+```
+
+Мобильный клиент находится в [`mobile/`](mobile/README.md):
+
+```bash
+cd mobile
+npm install
+npm run ios
+# или npm run android
 ```
 
 Для быстрой проверки интерфейса в браузере:

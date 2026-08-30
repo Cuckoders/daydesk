@@ -1,0 +1,76 @@
+import type { DayDeskState } from './types';
+import { todayAt, tomorrowAt } from './utils/date';
+
+const now = () => new Date().toISOString();
+
+export const initialState: DayDeskState = {
+  hydrated: false,
+  tasks: [
+    {
+      id: 'task-presentation',
+      title: 'Подготовить презентацию',
+      completed: false,
+      dueAt: todayAt(11, 30),
+      priority: 'high',
+      category: 'Работа',
+      reminderEnabled: true,
+      remindBeforeMinutes: 10,
+      recurrence: 'none',
+      updatedAt: now(),
+      syncVersion: 1,
+    },
+    {
+      id: 'task-team',
+      title: 'Ответить команде',
+      completed: true,
+      dueAt: todayAt(10),
+      priority: 'medium',
+      category: 'Работа',
+      reminderEnabled: false,
+      remindBeforeMinutes: 0,
+      recurrence: 'weekdays',
+      updatedAt: now(),
+      syncVersion: 1,
+    },
+    {
+      id: 'task-groceries',
+      title: 'Заказать продукты',
+      completed: false,
+      dueAt: todayAt(18, 30),
+      priority: 'low',
+      category: 'Личное',
+      reminderEnabled: true,
+      remindBeforeMinutes: 30,
+      recurrence: 'none',
+      updatedAt: now(),
+      syncVersion: 1,
+    },
+    {
+      id: 'task-dentist',
+      title: 'Записаться к стоматологу',
+      completed: false,
+      dueAt: tomorrowAt(16),
+      priority: 'medium',
+      category: 'Здоровье',
+      reminderEnabled: true,
+      remindBeforeMinutes: 60,
+      recurrence: 'none',
+      updatedAt: now(),
+      syncVersion: 1,
+    },
+  ],
+  events: [
+    { id: 'event-standup', title: 'Утренняя планёрка', startsAt: todayAt(9, 30), endsAt: todayAt(10), type: 'meeting', location: 'Google Meet' },
+    { id: 'event-anna', title: 'Встреча с Анной', startsAt: todayAt(15), endsAt: todayAt(16), type: 'meeting', location: 'Переговорная 2' },
+    { id: 'event-focus', title: 'Фокус-время', startsAt: todayAt(17), endsAt: todayAt(18, 30), type: 'focus' },
+  ],
+  routines: [
+    { id: 'routine-water', title: 'Выпить воды', time: '10:30', kind: 'water', enabled: true },
+    { id: 'routine-lunch', title: 'Обед', time: '13:00', kind: 'meal', enabled: true },
+    { id: 'routine-break', title: 'Перерыв и разминка', time: '16:00', kind: 'break', enabled: true },
+    { id: 'routine-dinner', title: 'Ужин', time: '20:00', kind: 'meal', enabled: true },
+  ],
+  accounts: [],
+  messages: [],
+  syncQueue: [],
+};
