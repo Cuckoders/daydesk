@@ -7,6 +7,8 @@ export interface Task {
   dueAt: string;
   priority: Priority;
   category: string;
+  remindBeforeMinutes?: number;
+  reminderEnabled?: boolean;
 }
 
 export interface CalendarEvent {

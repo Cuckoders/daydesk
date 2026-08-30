@@ -114,6 +114,7 @@ const routineOccurrences = (routines: Routine[], days = 32, from = new Date()): 
     for (const routine of routines) {
       if (!routine.enabled || !routine.days.includes(date.getDay())) continue;
       const [hours, minutes] = routine.time.split(":").map(Number);
+      if (!Number.isInteger(hours) || !Number.isInteger(minutes) || hours < 0 || hours > 23 || minutes < 0 || minutes > 59) continue;
       const startsAt = new Date(date.getFullYear(), date.getMonth(), date.getDate(), hours, minutes, 0, 0);
       const endsAt = new Date(startsAt.getTime() + 15 * 60_000);
       occurrences.push({
@@ -131,6 +132,39 @@ const routineOccurrences = (routines: Routine[], days = 32, from = new Date()): 
   }
   return occurrences.sort((left, right) => left.startsAt.localeCompare(right.startsAt));
 };
+const taskReminderEvents = (tasks: Task[]): CalendarEvent[] => tasks.flatMap((task) => {
+  const dueAt = new Date(task.dueAt);
+  const remindBeforeMinutes = task.remindBeforeMinutes ?? 0;
+  if (
+    task.completed
+    || !task.reminderEnabled
+    || Number.isNaN(dueAt.getTime())
+    || remindBeforeMinutes < 0
+    || remindBeforeMinutes > 7 * 24 * 60
+    || !task.title.trim()
+    || task.title.length > 300
+    || /[\u0000-\u001f\u007f]/.test(task.title)
+    || /[\u0000-\u001f\u007f]/.test(task.category)
+  ) return [];
+  return [{
+    id: `task:${task.id}`,
+    title: task.title,
+    startsAt: dueAt.toISOString(),
+    endsAt: new Date(dueAt.getTime() + 15 * 60_000).toISOString(),
+    type: "personal",
+    location: `Задача · ${task.category}`,
+    remindBeforeMinutes,
+    reminderEnabled: true,
+  }];
+});
+const taskDateLabel = (iso: string) => {
+  const date = new Date(iso);
+  const now = new Date();
+  if (sameDay(date, now)) return "Сегодня";
+  const tomorrow = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1);
+  if (sameDay(date, tomorrow)) return "Завтра";
+  return new Intl.DateTimeFormat("ru-RU", { day: "numeric", month: "short" }).format(date);
+};
 const calendarRange = () => {
   const timeMin = new Date();
   timeMin.setDate(timeMin.getDate() - 30);
@@ -142,6 +176,21 @@ const isCalendarAccount = (account: MailAccount): account is MailAccount & { pro
   account.authType === "oauth" && (account.provider === "gmail" || account.provider === "outlook");
 let calendarMutationVersion = 0;
 let calendarSyncVersion = 0;
+type DayDeskAction = "new-task" | "open-routines";
+const actionChannel = typeof BroadcastChannel === "undefined" ? null : new BroadcastChannel("daydesk-actions");
+const requestMainAction = async (action: DayDeskAction) => {
+  actionChannel?.postMessage(action);
+  try {
+    const { WebviewWindow } = await import("@tauri-apps/api/webviewWindow");
+    const main = await WebviewWindow.getByLabel("main");
+    if (main) {
+      await main.show();
+      await main.setFocus();
+    }
+  } catch {
+    window.opener?.focus();
+  }
+};
 const fetchCalendarEvents = async (account: MailAccount & { provider: OAuthProvider }) => {
   const remote = await syncRemoteCalendar({ provider: account.provider, accountId: account.id, ...calendarRange() });
   return remote.map((event) => toCalendarEvent(account, event));
@@ -275,15 +324,15 @@ function MiniCalendar({ events, selectedDate = new Date(), onSelect }: { events:
   );
 }
 
-function TaskRow({ task, onToggle }: { task: Task; onToggle: (id: string) => void }) {
+function TaskRow({ task, onToggle, onEdit }: { task: Task; onToggle: (id: string) => void; onEdit?: (task: Task) => void }) {
   return (
     <div className={`task-row ${task.completed ? "completed" : ""}`}>
       <button className="task-check" onClick={() => onToggle(task.id)} aria-label={task.completed ? "Вернуть задачу" : "Завершить задачу"}>
         {task.completed ? <Check size={14} /> : <Circle size={18} />}
       </button>
-      <div className="task-copy"><strong>{task.title}</strong><span><Clock3 size={13} />{shortTime(task.dueAt)} · {task.category}</span></div>
+      <div className="task-copy"><strong>{task.title}</strong><span><Clock3 size={13} />{taskDateLabel(task.dueAt)}, {shortTime(task.dueAt)} · {task.category}{task.reminderEnabled ? <Bell size={11} /> : null}</span></div>
       <span className={`priority ${task.priority}`} />
-      <button className="icon-button"><MoreHorizontal size={18} /></button>
+      {onEdit ? <button className="icon-button task-edit" onClick={() => onEdit(task)} aria-label={`Изменить задачу «${task.title}»`}><MoreHorizontal size={18} /></button> : null}
     </div>
   );
 }
@@ -523,23 +572,49 @@ function MailComposer({ accounts, seed, onClose, onSent }: { accounts: MailAccou
   );
 }
 
-function AddTask({ onAdd, onClose }: { onAdd: (title: string, time: string) => void; onClose: () => void }) {
-  const [title, setTitle] = useState("");
-  const [time, setTime] = useState("18:00");
+function TaskEditor({ existing, onSave, onDelete, onClose }: { existing?: Task; onSave: (task: Task) => void; onDelete: (task: Task) => void; onClose: () => void }) {
+  const defaultDueAt = useMemo(() => {
+    const due = new Date();
+    due.setMinutes(0, 0, 0);
+    due.setHours(due.getHours() + 1);
+    return due.toISOString();
+  }, []);
+  const [title, setTitle] = useState(existing?.title ?? "");
+  const [date, setDate] = useState(() => inputDate(existing?.dueAt ?? defaultDueAt));
+  const [time, setTime] = useState(() => inputTime(existing?.dueAt ?? defaultDueAt));
+  const [priority, setPriority] = useState<Task["priority"]>(existing?.priority ?? "medium");
+  const [category, setCategory] = useState(existing?.category ?? "Личное");
+  const [reminderEnabled, setReminderEnabled] = useState(existing?.reminderEnabled ?? true);
+  const [remindBeforeMinutes, setRemindBeforeMinutes] = useState(existing?.remindBeforeMinutes ?? 10);
   const submit = (event: FormEvent) => {
     event.preventDefault();
     if (!title.trim()) return;
-    onAdd(title.trim(), time);
+    onSave({
+      id: existing?.id ?? uid(),
+      title: title.trim(),
+      completed: existing?.completed ?? false,
+      dueAt: combineDateTime(date, time),
+      priority,
+      category: category.trim() || "Личное",
+      remindBeforeMinutes: reminderEnabled ? remindBeforeMinutes : 0,
+      reminderEnabled,
+    });
   };
   return (
     <div className="modal-backdrop" onMouseDown={onClose}>
-      <form className="quick-modal" onSubmit={submit} onMouseDown={(event) => event.stopPropagation()}>
+      <form className="quick-modal task-modal" onSubmit={submit} onMouseDown={(event) => event.stopPropagation()}>
         <div className="modal-icon"><ListTodo size={22} /></div>
-        <div><span className="eyebrow">НОВАЯ ЗАДАЧА</span><h2>Что нужно сделать?</h2></div>
-        <button type="button" className="icon-button modal-close" onClick={onClose}><X size={20} /></button>
-        <label>Название<input autoFocus value={title} onChange={(event) => setTitle(event.target.value)} placeholder="Например, позвонить врачу" /></label>
-        <label>Напомнить<input type="time" value={time} onChange={(event) => setTime(event.target.value)} /></label>
-        <div className="modal-actions"><button type="button" className="secondary-button" onClick={onClose}>Отмена</button><button className="primary-button"><Plus size={17} />Добавить</button></div>
+        <div><span className="eyebrow">ЗАДАЧА</span><h2>{existing ? "Изменить задачу" : "Что нужно сделать?"}</h2></div>
+        <button type="button" className="icon-button modal-close" onClick={onClose} aria-label="Закрыть"><X size={20} /></button>
+        <div className="form-grid">
+          <label className="field-full">Название<input autoFocus maxLength={300} value={title} onChange={(event) => setTitle(event.target.value)} placeholder="Например, позвонить врачу" /></label>
+          <label>Дата<input required type="date" value={date} onChange={(event) => setDate(event.target.value)} /></label>
+          <label>Время<input required type="time" value={time} onChange={(event) => setTime(event.target.value)} /></label>
+          <label>Приоритет<select value={priority} onChange={(event) => setPriority(event.target.value as Task["priority"])}><option value="high">Высокий</option><option value="medium">Средний</option><option value="low">Низкий</option></select></label>
+          <label>Категория<input maxLength={50} value={category} onChange={(event) => setCategory(event.target.value)} placeholder="Личное" /></label>
+          <label className="field-full">Напомнить<select value={reminderEnabled ? String(remindBeforeMinutes) : "none"} onChange={(event) => { const value = event.target.value; setReminderEnabled(value !== "none"); if (value !== "none") setRemindBeforeMinutes(Number(value)); }}><option value="none">Не напоминать</option><option value="0">В срок задачи</option><option value="5">За 5 минут</option><option value="10">За 10 минут</option><option value="30">За 30 минут</option><option value="60">За 1 час</option><option value="1440">За 1 день</option></select></label>
+        </div>
+        <div className="modal-actions event-actions">{existing ? <button type="button" className="danger-button" onClick={() => onDelete(existing)}><Trash2 size={16} />Удалить</button> : null}<span /><button type="button" className="secondary-button" onClick={onClose}>Отмена</button><button className="primary-button"><Check size={17} />Сохранить</button></div>
       </form>
     </div>
   );
@@ -643,11 +718,12 @@ function EventEditor({ existing, accounts, onSave, onDelete, onClose }: { existi
   );
 }
 
-function TodayView({ state, setState, onAddTask, onAddEvent, onEditEvent }: { state: AppState; setState: React.Dispatch<React.SetStateAction<AppState>>; onAddTask: () => void; onAddEvent: () => void; onEditEvent: (event: CalendarEvent) => void }) {
+function TodayView({ state, setState, onAddTask, onEditTask, onAddEvent, onEditEvent }: { state: AppState; setState: React.Dispatch<React.SetStateAction<AppState>>; onAddTask: () => void; onEditTask: (task: Task) => void; onAddEvent: () => void; onEditEvent: (event: CalendarEvent) => void }) {
   const now = useClock();
   const greeting = now.getHours() < 12 ? "Доброе утро" : now.getHours() < 18 ? "Добрый день" : "Добрый вечер";
-  const completed = state.tasks.filter((task) => task.completed).length;
-  const progress = state.tasks.length ? Math.round((completed / state.tasks.length) * 100) : 0;
+  const todayTasks = state.tasks.filter((task) => sameDay(new Date(task.dueAt), now)).sort((left, right) => left.dueAt.localeCompare(right.dueAt));
+  const completed = todayTasks.filter((task) => task.completed).length;
+  const progress = todayTasks.length ? Math.round((completed / todayTasks.length) * 100) : 0;
   const todayEvents = [...state.events, ...routineOccurrences(state.routines ?? [], 1, now)].filter((event) => eventOccursOnDate(event, now)).sort((left, right) => left.startsAt.localeCompare(right.startsAt));
   const toggleTask = (id: string) => setState((current) => ({ ...current, tasks: current.tasks.map((task) => task.id === id ? { ...task, completed: !task.completed } : task) }));
   return (
@@ -656,8 +732,8 @@ function TodayView({ state, setState, onAddTask, onAddEvent, onEditEvent }: { st
       <MiniCalendar events={state.events} selectedDate={now} />
       <div className="dashboard-grid">
         <section className="card tasks-card">
-          <div className="card-head"><div><span className="eyebrow"><CheckCircle2 size={15} />ЗАДАЧИ</span><h2>На сегодня <span>{state.tasks.filter((task) => !task.completed).length}</span></h2></div><div className="progress-ring" style={{ "--progress": `${progress * 3.6}deg` } as React.CSSProperties}><span>{progress}%</span></div></div>
-          <div className="task-list">{state.tasks.map((task) => <TaskRow key={task.id} task={task} onToggle={toggleTask} />)}</div>
+          <div className="card-head"><div><span className="eyebrow"><CheckCircle2 size={15} />ЗАДАЧИ</span><h2>На сегодня <span>{todayTasks.filter((task) => !task.completed).length}</span></h2></div><div className="progress-ring" style={{ "--progress": `${progress * 3.6}deg` } as React.CSSProperties}><span>{progress}%</span></div></div>
+          <div className="task-list">{todayTasks.length ? todayTasks.map((task) => <TaskRow key={task.id} task={task} onToggle={toggleTask} onEdit={onEditTask} />) : <div className="empty-state">На сегодня задач нет</div>}</div>
           <button className="add-row" onClick={onAddTask}><Plus size={17} />Добавить задачу</button>
         </section>
         <section className="card schedule-card">
@@ -671,9 +747,10 @@ function TodayView({ state, setState, onAddTask, onAddEvent, onEditEvent }: { st
   );
 }
 
-function TasksView({ state, setState, onAdd }: { state: AppState; setState: React.Dispatch<React.SetStateAction<AppState>>; onAdd: () => void }) {
+function TasksView({ state, setState, onAdd, onEdit }: { state: AppState; setState: React.Dispatch<React.SetStateAction<AppState>>; onAdd: () => void; onEdit: (task: Task) => void }) {
   const toggle = (id: string) => setState((current) => ({ ...current, tasks: current.tasks.map((task) => task.id === id ? { ...task, completed: !task.completed } : task) }));
-  return <section className="page-section"><div className="page-title"><div><span className="eyebrow">МОЙ ДЕНЬ</span><h1>Задачи</h1><p>Соберите всё важное в одном спокойном списке.</p></div><button className="primary-button" onClick={onAdd}><Plus size={17} />Новая задача</button></div><div className="card large-list">{state.tasks.map((task) => <TaskRow key={task.id} task={task} onToggle={toggle} />)}<button className="add-row" onClick={onAdd}><Plus size={17} />Добавить задачу</button></div></section>;
+  const tasks = [...state.tasks].sort((left, right) => left.completed === right.completed ? left.dueAt.localeCompare(right.dueAt) : Number(left.completed) - Number(right.completed));
+  return <section className="page-section"><div className="page-title"><div><span className="eyebrow">МОЙ ДЕНЬ</span><h1>Задачи</h1><p>Соберите всё важное в одном спокойном списке.</p></div><button className="primary-button" onClick={onAdd}><Plus size={17} />Новая задача</button></div><div className="card large-list">{tasks.map((task) => <TaskRow key={task.id} task={task} onToggle={toggle} onEdit={onEdit} />)}<button className="add-row" onClick={onAdd}><Plus size={17} />Добавить задачу</button></div></section>;
 }
 
 function CalendarView({ state, setState, onAdd, onEdit }: { state: AppState; setState: React.Dispatch<React.SetStateAction<AppState>>; onAdd: () => void; onEdit: (event: CalendarEvent) => void }) {
@@ -1200,10 +1277,10 @@ function WidgetApp({ state, kind }: { state: AppState; kind: "agenda" | "rhythm"
   if (kind === "rhythm") {
     const routines = state.routines ?? [];
     const upcoming = routineOccurrences(routines, 2, now).filter((event) => new Date(event.startsAt) >= now).slice(0, 5);
-    return <main className="desktop-widget rhythm-widget"><div className="widget-drag" data-tauri-drag-region><Logo /><span data-tauri-drag-region>Ритм дня</span><Clock3 size={17} /></div><div className="widget-date"><span>{longDate(now)}</span><strong>{new Intl.DateTimeFormat("ru-RU", { hour: "2-digit", minute: "2-digit" }).format(now)}</strong></div><div className="rhythm-widget-summary"><Sparkles size={20} /><div><strong>{upcoming.length ? `Дальше — ${upcoming[0].title}` : "На сегодня всё"}</strong><span>{upcoming.length ? shortTime(upcoming[0].startsAt) : "Можно отдохнуть"}</span></div></div><div className="widget-tasks rhythm-widget-list">{upcoming.map((routine) => <div key={routine.id}><Clock3 size={16} /><span>{routine.title}</span><time>{shortTime(routine.startsAt)}</time></div>)}</div><div className="widget-add"><Bell size={16} />{routines.filter((routine) => routine.enabled).length} активных напоминания</div></main>;
+    return <main className="desktop-widget rhythm-widget"><div className="widget-drag" data-tauri-drag-region><Logo /><span data-tauri-drag-region>Ритм дня</span><Clock3 size={17} /></div><div className="widget-date"><span>{longDate(now)}</span><strong>{new Intl.DateTimeFormat("ru-RU", { hour: "2-digit", minute: "2-digit" }).format(now)}</strong></div><div className="rhythm-widget-summary"><Sparkles size={20} /><div><strong>{upcoming.length ? `Дальше — ${upcoming[0].title}` : "На сегодня всё"}</strong><span>{upcoming.length ? shortTime(upcoming[0].startsAt) : "Можно отдохнуть"}</span></div></div><div className="widget-tasks rhythm-widget-list">{upcoming.map((routine) => <div key={routine.id}><Clock3 size={16} /><span>{routine.title}</span><time>{shortTime(routine.startsAt)}</time></div>)}</div><button className="widget-add" onClick={() => void requestMainAction("open-routines")}><Bell size={16} />Настроить · {routines.filter((routine) => routine.enabled).length}</button></main>;
   }
-  const upcoming = state.tasks.filter((task) => !task.completed).slice(0, 4);
-  return <main className="desktop-widget"><div className="widget-drag" data-tauri-drag-region><Logo /><span data-tauri-drag-region>Сегодня</span><button className="icon-button"><MoreHorizontal size={17} /></button></div><div className="widget-date"><span>{longDate(now)}</span><strong>{new Intl.DateTimeFormat("ru-RU", { hour: "2-digit", minute: "2-digit" }).format(now)}</strong></div><div className="widget-stat"><div><CheckCircle2 size={20} /><strong>{upcoming.length}</strong><span>осталось</span></div><div><CalendarDays size={20} /><strong>{state.events.length}</strong><span>событий</span></div></div><div className="widget-tasks">{upcoming.map((task) => <div key={task.id}><Circle size={17} /><span>{task.title}</span><time>{shortTime(task.dueAt)}</time></div>)}</div><button className="widget-add"><Plus size={17} />Добавить задачу</button></main>;
+  const upcoming = state.tasks.filter((task) => !task.completed).sort((left, right) => left.dueAt.localeCompare(right.dueAt)).slice(0, 4);
+  return <main className="desktop-widget"><div className="widget-drag" data-tauri-drag-region><Logo /><span data-tauri-drag-region>Сегодня</span><button className="icon-button"><MoreHorizontal size={17} /></button></div><div className="widget-date"><span>{longDate(now)}</span><strong>{new Intl.DateTimeFormat("ru-RU", { hour: "2-digit", minute: "2-digit" }).format(now)}</strong></div><div className="widget-stat"><div><CheckCircle2 size={20} /><strong>{upcoming.length}</strong><span>осталось</span></div><div><CalendarDays size={20} /><strong>{state.events.length}</strong><span>событий</span></div></div><div className="widget-tasks">{upcoming.map((task) => <div key={task.id}><Circle size={17} /><span>{task.title}</span><time>{shortTime(task.dueAt)}</time></div>)}</div><button className="widget-add" onClick={() => void requestMainAction("new-task")}><Plus size={17} />Добавить задачу</button></main>;
 }
 
 export default function App() {
@@ -1214,7 +1291,7 @@ export default function App() {
   const [persistenceError, setPersistenceError] = useState("");
   const [reminderError, setReminderError] = useState("");
   const [view, setView] = useState<View>("today");
-  const [adding, setAdding] = useState(false);
+  const [taskEditor, setTaskEditor] = useState<Task | "new" | null>(null);
   const [eventEditor, setEventEditor] = useState<CalendarEvent | "new" | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -1239,10 +1316,10 @@ export default function App() {
 
   useEffect(() => {
     if (isWidget) return;
-    void replaceBackgroundReminders([...state.events, ...routineOccurrences(state.routines ?? [])])
+    void replaceBackgroundReminders([...state.events, ...routineOccurrences(state.routines ?? []), ...taskReminderEvents(state.tasks)])
       .then(() => setReminderError(""))
       .catch(() => setReminderError("Не удалось обновить фоновые напоминания. Перезапустите DayDesk."));
-  }, [isWidget, reminderScheduleTick, state.events, state.routines]);
+  }, [isWidget, reminderScheduleTick, state.events, state.routines, state.tasks]);
 
   useEffect(() => {
     if (isWidget) return;
@@ -1294,6 +1371,17 @@ export default function App() {
     channel.addEventListener("message", receive);
     return () => channel.removeEventListener("message", receive);
   }, []);
+
+  useEffect(() => {
+    if (isWidget || !actionChannel) return;
+    const channel = actionChannel;
+    const receive = (event: MessageEvent<DayDeskAction>) => {
+      if (event.data === "new-task") setTaskEditor("new");
+      if (event.data === "open-routines") setView("widgets");
+    };
+    channel.addEventListener("message", receive);
+    return () => channel.removeEventListener("message", receive);
+  }, [isWidget]);
 
   useEffect(() => {
     if (isWidget || !mailAccountsKey) return;
@@ -1385,12 +1473,19 @@ export default function App() {
     };
   }, [isWidget, calendarAccountsKey]);
 
-  const addTask = useCallback((title: string, time: string) => {
-    const [hours, minutes] = time.split(":").map(Number);
-    const due = new Date();
-    due.setHours(hours, minutes, 0, 0);
-    setState((current) => ({ ...current, tasks: [...current.tasks, { id: uid(), title, completed: false, dueAt: due.toISOString(), priority: "medium", category: "Личное" }] }));
-    setAdding(false);
+  const saveTask = useCallback((task: Task) => {
+    setState((current) => {
+      const exists = current.tasks.some((item) => item.id === task.id);
+      const tasks = exists ? current.tasks.map((item) => item.id === task.id ? task : item) : [...current.tasks, task];
+      return { ...current, tasks: tasks.sort((left, right) => left.dueAt.localeCompare(right.dueAt)) };
+    });
+    setTaskEditor(null);
+  }, []);
+
+  const deleteTask = useCallback((task: Task) => {
+    if (!window.confirm(`Удалить задачу «${task.title}»?`)) return;
+    setState((current) => ({ ...current, tasks: current.tasks.filter((item) => item.id !== task.id) }));
+    setTaskEditor(null);
   }, []);
 
   const saveEvent = useCallback(async (event: CalendarEvent) => {
@@ -1461,14 +1556,16 @@ export default function App() {
 
   const openNewEvent = useCallback(() => setEventEditor("new"), []);
   const openEvent = useCallback((event: CalendarEvent) => setEventEditor(event), []);
+  const openNewTask = useCallback(() => setTaskEditor("new"), []);
+  const openTask = useCallback((task: Task) => setTaskEditor(task), []);
 
   const page = useMemo(() => {
-    if (view === "tasks") return <TasksView state={state} setState={setState} onAdd={() => setAdding(true)} />;
+    if (view === "tasks") return <TasksView state={state} setState={setState} onAdd={openNewTask} onEdit={openTask} />;
     if (view === "calendar") return <CalendarView state={state} setState={setState} onAdd={openNewEvent} onEdit={openEvent} />;
     if (view === "mail") return <MailView state={state} setState={setState} searchQuery={searchQuery} />;
     if (view === "widgets") return <WidgetsView state={state} setState={setState} />;
-    return <TodayView state={state} setState={setState} onAddTask={() => setAdding(true)} onAddEvent={openNewEvent} onEditEvent={openEvent} />;
-  }, [openEvent, openNewEvent, searchQuery, state, view]);
+    return <TodayView state={state} setState={setState} onAddTask={openNewTask} onEditTask={openTask} onAddEvent={openNewEvent} onEditEvent={openEvent} />;
+  }, [openEvent, openNewEvent, openNewTask, openTask, searchQuery, state, view]);
 
   if (isWidget) return <WidgetApp state={state} kind={widgetKind} />;
 
@@ -1477,11 +1574,11 @@ export default function App() {
       <Sidebar view={view} onChange={setView} open={sidebarOpen} onClose={() => setSidebarOpen(false)} onSettings={() => { setSettingsOpen(true); setSidebarOpen(false); }} unreadCount={state.messages.filter((message) => message.unread).length} />
       {sidebarOpen ? <button className="sidebar-scrim" onClick={() => setSidebarOpen(false)} aria-label="Закрыть меню" /> : null}
       <div className="app-content">
-        <header className="topbar"><button className="icon-button menu-button" onClick={() => setSidebarOpen(true)}><Menu size={20} /></button><div className="search-box"><Search size={18} /><input ref={searchInput} value={searchQuery} aria-label="Поиск писем" maxLength={200} placeholder="Найти письмо…" onChange={(event) => { setSearchQuery(event.target.value); if (event.target.value.trim()) setView("mail"); }} />{searchQuery ? <button className="search-clear" onClick={() => setSearchQuery("")} aria-label="Очистить поиск"><X size={15} /></button> : <kbd>Ctrl K</kbd>}</div><div className="top-actions"><button className="icon-button notification-button"><Bell size={19} /><i /></button><button className="primary-button quick-add" onClick={() => setAdding(true)}><Plus size={18} />Добавить</button></div></header>
+        <header className="topbar"><button className="icon-button menu-button" onClick={() => setSidebarOpen(true)}><Menu size={20} /></button><div className="search-box"><Search size={18} /><input ref={searchInput} value={searchQuery} aria-label="Поиск писем" maxLength={200} placeholder="Найти письмо…" onChange={(event) => { setSearchQuery(event.target.value); if (event.target.value.trim()) setView("mail"); }} />{searchQuery ? <button className="search-clear" onClick={() => setSearchQuery("")} aria-label="Очистить поиск"><X size={15} /></button> : <kbd>Ctrl K</kbd>}</div><div className="top-actions"><button className="icon-button notification-button"><Bell size={19} /><i /></button><button className="primary-button quick-add" onClick={openNewTask}><Plus size={18} />Добавить</button></div></header>
         {persistenceError || reminderError ? <div className="runtime-error" role="alert">{persistenceError || reminderError}</div> : null}
         <main className="content-area">{page}</main>
       </div>
-      {adding ? <AddTask onAdd={addTask} onClose={() => setAdding(false)} /> : null}
+      {taskEditor ? <TaskEditor existing={taskEditor === "new" ? undefined : taskEditor} onSave={saveTask} onDelete={deleteTask} onClose={() => setTaskEditor(null)} /> : null}
       {eventEditor ? <EventEditor existing={eventEditor === "new" ? undefined : eventEditor} accounts={state.accounts} onSave={saveEvent} onDelete={deleteEvent} onClose={() => setEventEditor(null)} /> : null}
       {settingsOpen ? <SettingsModal onClose={() => setSettingsOpen(false)} /> : null}
     </div>

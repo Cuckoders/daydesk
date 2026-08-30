@@ -1,5 +1,5 @@
 import { initialState } from "../data";
-import type { AppState, Routine, RoutineKind } from "../types";
+import type { AppState, Routine, RoutineKind, Task } from "../types";
 
 const STORAGE_KEY = "daydesk:state:v1";
 const MAX_PERSISTED_STATE_BYTES = 4 * 1024 * 1024;
@@ -7,6 +7,33 @@ const MAX_PERSISTED_STATE_BYTES = 4 * 1024 * 1024;
 const serializeState = (state: AppState) => JSON.stringify({ ...state, messages: [] });
 const byteLength = (value: string) => new TextEncoder().encode(value).byteLength;
 const routineKinds = new Set<RoutineKind>(["water", "meal", "break", "focus", "custom"]);
+const taskPriorities = new Set<Task["priority"]>(["high", "medium", "low"]);
+
+function sanitizeTasks(value: unknown): Task[] {
+  if (!Array.isArray(value)) return initialState.tasks;
+  return value.slice(0, 5_000).flatMap((candidate) => {
+    if (!candidate || typeof candidate !== "object") return [];
+    const raw = candidate as Partial<Task>;
+    const id = typeof raw.id === "string" ? raw.id.trim() : "";
+    const title = typeof raw.title === "string" ? raw.title.trim() : "";
+    const category = typeof raw.category === "string" ? raw.category.trim() : "";
+    const dueAt = typeof raw.dueAt === "string" ? new Date(raw.dueAt) : new Date(Number.NaN);
+    if (!id || id.length > 100 || !title || title.length > 300 || !category || category.length > 100 || Number.isNaN(dueAt.getTime())) return [];
+    if (/[\u0000-\u001f\u007f]/.test(`${id}${title}${category}`) || !taskPriorities.has(raw.priority as Task["priority"])) return [];
+    const reminderMinutes = typeof raw.remindBeforeMinutes === "number" ? raw.remindBeforeMinutes : 0;
+    const reminderIsValid = Number.isInteger(reminderMinutes) && reminderMinutes >= 0 && reminderMinutes <= 7 * 24 * 60;
+    return [{
+      id,
+      title,
+      completed: raw.completed === true,
+      dueAt: dueAt.toISOString(),
+      priority: raw.priority as Task["priority"],
+      category,
+      remindBeforeMinutes: reminderIsValid ? reminderMinutes : 0,
+      reminderEnabled: raw.reminderEnabled === true && reminderIsValid,
+    }];
+  });
+}
 
 function sanitizeRoutines(value: unknown): Routine[] {
   if (!Array.isArray(value)) return initialState.routines;
@@ -54,6 +81,7 @@ export function loadState(): AppState {
     const accountIds = new Set(accounts.map((account) => account.id));
     return {
       ...stored,
+      tasks: sanitizeTasks(stored.tasks),
       events: (stored.events ?? []).map((event) => ({
         ...event,
         remindBeforeMinutes: event.remindBeforeMinutes ?? 10,
