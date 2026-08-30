@@ -4,16 +4,19 @@ import { BlockList, isIP } from 'node:net';
 
 import { ImapFlow, type FetchMessageObject } from 'imapflow';
 import { simpleParser } from 'mailparser';
+import nodemailer from 'nodemailer';
 
 import type { ServerConfig } from './config.js';
 import type { DayDeskDatabase } from './database.js';
-import type { MailAccount, MailContent, MailMessage } from './types.js';
+import { buildMimeMessage } from './mail-compose.js';
+import type { MailAccount, MailContent, MailMessage, OutgoingMailAttachment, OutgoingMailInput } from './types.js';
 
 const MAIL_LIMIT = 50;
 const ACCOUNT_LIMIT = 20;
 const PREVIEW_SOURCE_BYTES = 64 * 1024;
 const MESSAGE_SOURCE_BYTES = 2 * 1024 * 1024;
 const MAX_BODY_CHARACTERS = 200_000;
+const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const blockedAddresses = new BlockList();
 for (const [network, prefix] of [
   ['0.0.0.0', 8], ['10.0.0.0', 8], ['100.64.0.0', 10], ['127.0.0.0', 8], ['169.254.0.0', 16],
@@ -105,7 +108,7 @@ export function decryptSecret(key: Buffer, associatedData: string, value: string
   }
 }
 
-async function resolveMailHost(host: string, allowPrivate: boolean) {
+export async function resolveMailHost(host: string, allowPrivate: boolean) {
   const addresses = await lookup(host, { all: true, verbatim: true }).catch(() => { throw new MailConnectionError('Mail connection failed'); });
   const selected = addresses.at(0);
   if (!selected || (!allowPrivate && addresses.some(({ address }) => isBlockedMailAddress(address)))) {
@@ -114,9 +117,24 @@ async function resolveMailHost(host: string, allowPrivate: boolean) {
   return selected.address;
 }
 
+function smtpSettings(imapHost: string) {
+  const known: Record<string, { host: string; port: 465 | 587 }> = {
+    'imap.yandex.ru': { host: 'smtp.yandex.ru', port: 465 },
+    'imap.mail.ru': { host: 'smtp.mail.ru', port: 465 },
+    'imap.mail.me.com': { host: 'smtp.mail.me.com', port: 587 },
+    'imap.gmail.com': { host: 'smtp.gmail.com', port: 465 },
+  };
+  return known[imapHost] ?? { host: imapHost.replace(/^imap\./i, 'smtp.'), port: 465 as const };
+}
+
 function senderName(message: FetchMessageObject) {
   const sender = message.envelope?.from?.[0];
   return (sender?.name?.trim() || sender?.address?.trim() || 'Без отправителя').replace(/[\u0000-\u001f\u007f]/g, '').slice(0, 500);
+}
+
+function senderAddress(message: FetchMessageObject) {
+  const address = message.envelope?.from?.[0]?.address;
+  return address && address.length <= 320 && emailPattern.test(address) ? address.toLowerCase() : undefined;
 }
 
 async function previewFromSource(source?: Buffer) {
@@ -169,16 +187,15 @@ function createImapTransport(config: ServerConfig): MailTransport {
         const loaded = await client.fetchAll(`${start}:*`, {
           uid: true, flags: true, envelope: true, internalDate: true, source: { start: 0, maxLength: PREVIEW_SOURCE_BYTES },
         });
-        const messages = await Promise.all(loaded.map(async (message): Promise<MailMessage> => ({
-          id: String(message.uid),
-          accountId: connection.account.id,
-          sender: senderName(message),
-          subject: message.envelope?.subject?.trim().replace(/[\u0000-\u001f\u007f]/g, '').slice(0, 1_000) || 'Без темы',
-          preview: await previewFromSource(message.source),
-          receivedAt: new Date(message.envelope?.date ?? message.internalDate ?? Date.now()).toISOString(),
-          unread: !message.flags?.has('\\Seen'),
-          starred: Boolean(message.flags?.has('\\Flagged')),
-        })));
+        const messages = await Promise.all(loaded.map(async (message): Promise<MailMessage> => {
+          const replyTo = senderAddress(message);
+          return {
+            id: String(message.uid), accountId: connection.account.id, sender: senderName(message),
+            subject: message.envelope?.subject?.trim().replace(/[\u0000-\u001f\u007f]/g, '').slice(0, 1_000) || 'Без темы',
+            preview: await previewFromSource(message.source), receivedAt: new Date(message.envelope?.date ?? message.internalDate ?? Date.now()).toISOString(),
+            unread: !message.flags?.has('\\Seen'), starred: Boolean(message.flags?.has('\\Flagged')), ...(replyTo ? { replyTo } : {}),
+          };
+        }));
         return messages.sort((left, right) => right.receivedAt.localeCompare(left.receivedAt));
       } finally {
         lock.release();
@@ -205,6 +222,7 @@ export interface MailService {
   accounts(): MailAccount[];
   synchronize(accountId?: string): Promise<{ accounts: MailAccount[]; messages: MailMessage[]; serverTime: string }>;
   content(accountId: string, messageId: string): Promise<MailContent>;
+  send(accountId: string, input: OutgoingMailInput, attachments: OutgoingMailAttachment[]): Promise<void>;
   remove(accountId: string): void;
 }
 
@@ -258,6 +276,28 @@ export function createMailService(database: DayDeskDatabase, config: ServerConfi
       return { accounts: connections.map((item) => item.account), messages: messages.sort((left, right) => right.receivedAt.localeCompare(left.receivedAt)), serverTime: now };
     },
     content: (accountId, messageId) => transport.content(connection(accountId), messageId),
+    send: async (accountId, input, attachments) => {
+      const stored = connection(accountId);
+      try {
+        const smtp = smtpSettings(stored.account.host);
+        const resolvedHost = await resolveMailHost(smtp.host, Boolean(config.allowPrivateMailHosts));
+        const mime = await buildMimeMessage(stored.account.address, input, attachments);
+        const sender = nodemailer.createTransport({
+          host: resolvedHost,
+          port: smtp.port,
+          secure: smtp.port === 465,
+          requireTLS: true,
+          auth: { user: stored.account.username, pass: stored.password },
+          tls: { servername: smtp.host, minVersion: 'TLSv1.2', rejectUnauthorized: true },
+          connectionTimeout: 12_000,
+          greetingTimeout: 10_000,
+          socketTimeout: 30_000,
+        });
+        try { await sender.sendMail({ envelope: { from: stored.account.address, to: [...input.to, ...input.cc, ...input.bcc] }, raw: mime }); }
+        finally { sender.close(); }
+      } catch (error) { if (error instanceof TypeError) throw error; throw new MailConnectionError('Mail sending failed'); }
+      finally { stored.password = ''; }
+    },
     remove: (accountId) => {
       const result = database.prepare('DELETE FROM mail_accounts WHERE id = ?').run(accountId);
       if (!result.changes) throw new MailNotFoundError('Mail account not found');

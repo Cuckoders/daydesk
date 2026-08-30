@@ -1,5 +1,7 @@
+import { File } from 'expo-file-system';
+
 import { authenticatedRequest } from '@/src/services/sync';
-import type { MailAccount, MailContent, MailMessage } from '@/src/types';
+import type { MailAccount, MailContent, MailMessage, OutgoingMailAttachment, OutgoingMailInput } from '@/src/types';
 
 export type OAuthMailProvider = 'gmail' | 'outlook';
 
@@ -22,6 +24,7 @@ const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const hostPattern = /^(?=.{1,253}$)(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}$/;
 const controlCharacters = /[\u0000-\u001f\u007f]/;
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const attachmentTokenPattern = /^[A-Za-z0-9_-]{43}$/;
 const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value);
 
 function readEnvelope(value: unknown) {
@@ -48,6 +51,7 @@ function readMessage(value: unknown): MailMessage {
     || typeof value.subject !== 'string' || typeof value.preview !== 'string' || typeof value.receivedAt !== 'string'
     || typeof value.unread !== 'boolean' || typeof value.starred !== 'boolean' || value.sender.length > 500 || value.subject.length > 1_000
     || value.preview.length > 300 || !/^[A-Za-z0-9_-]{1,2048}$/.test(value.id) || !uuidPattern.test(value.accountId)
+    || (value.replyTo !== undefined && (typeof value.replyTo !== 'string' || value.replyTo.length > 320 || !emailPattern.test(value.replyTo)))
     || !Number.isFinite(Date.parse(value.receivedAt))) throw new Error('Сервер вернул некорректное письмо');
   return value as unknown as MailMessage;
 }
@@ -133,4 +137,40 @@ export async function waitForMailOAuth(flow: MailOAuthStart, timeoutMs = 30_000)
     await new Promise((resolve) => setTimeout(resolve, 1_000));
   }
   throw new Error('Не удалось подтвердить вход. Закройте окно браузера после сообщения DayDesk и повторите.');
+}
+
+function readOutgoingAttachment(value: unknown): OutgoingMailAttachment {
+  if (!isRecord(value) || typeof value.token !== 'string' || !attachmentTokenPattern.test(value.token) || typeof value.name !== 'string'
+    || !value.name || value.name.length > 255 || controlCharacters.test(value.name) || typeof value.mimeType !== 'string'
+    || value.mimeType.length > 255 || typeof value.size !== 'number' || !Number.isInteger(value.size) || value.size < 1 || value.size > 2 * 1024 * 1024) {
+    throw new Error('Сервер вернул некорректное вложение');
+  }
+  return value as unknown as OutgoingMailAttachment;
+}
+
+export async function uploadMailAttachment(input: { uri: string; name: string; mimeType?: string; size?: number }) {
+  const name = input.name.trim(); const mimeType = input.mimeType?.trim().toLowerCase() || 'application/octet-stream';
+  if (!name || name.length > 255 || controlCharacters.test(name) || /[/\\]/.test(name)) throw new Error('Некорректное имя файла');
+  if (!/^[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]{0,126}\/[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]{0,126}$/.test(mimeType)) throw new Error('Некорректный тип файла');
+  if (input.size !== undefined && (!Number.isInteger(input.size) || input.size < 1 || input.size > 2 * 1024 * 1024)) throw new Error('Файл превышает лимит 2 МБ');
+  const file = new File(input.uri);
+  if (!file.size || file.size > 2 * 1024 * 1024) throw new Error('Файл превышает лимит 2 МБ');
+  const data = await file.base64();
+  const response = readEnvelope(await authenticatedRequest<unknown>('/v1/mail/attachments', { method: 'POST', body: JSON.stringify({ name, mimeType, data }) }));
+  return readOutgoingAttachment(response);
+}
+
+export async function discardMailAttachments(tokens: string[]) {
+  if (tokens.length > 10 || tokens.some((token) => !attachmentTokenPattern.test(token))) throw new Error('Некорректные вложения');
+  if (tokens.length) await authenticatedRequest<void>('/v1/mail/attachments', { method: 'DELETE', body: JSON.stringify({ tokens }) });
+}
+
+export async function sendMail(input: OutgoingMailInput) {
+  const recipients = [...input.to, ...input.cc, ...input.bcc];
+  if (!uuidPattern.test(input.accountId) || !input.to.length || recipients.length > 25 || recipients.some((address) => !emailPattern.test(address) || address.length > 320)) throw new Error('Проверьте адреса получателей');
+  if (new Set(recipients.map((address) => address.toLowerCase())).size !== recipients.length) throw new Error('Удалите повторяющиеся адреса');
+  if (input.subject.length > 500 || controlCharacters.test(input.subject) || input.body.length > 200_000 || input.body.includes('\0')) throw new Error('Тема или текст письма некорректны');
+  if (input.attachmentTokens.length > 10 || input.attachmentTokens.some((token) => !attachmentTokenPattern.test(token)) || (!input.body.trim() && !input.attachmentTokens.length)) throw new Error('Добавьте текст или вложение');
+  const data = readEnvelope(await authenticatedRequest<unknown>('/v1/mail/send', { method: 'POST', body: JSON.stringify(input) }));
+  if (data.accepted !== true) throw new Error('Сервер не подтвердил отправку');
 }

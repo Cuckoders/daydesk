@@ -212,3 +212,37 @@ export const mailOAuthCallbackSchema = {
     },
   },
 } as const;
+
+const attachmentToken = { type: 'string', minLength: 43, maxLength: 43, pattern: '^[A-Za-z0-9_-]+$' } as const;
+const recipientArray = { type: 'array', maxItems: 25, uniqueItems: true, items: { type: 'string', format: 'email', maxLength: 320 } } as const;
+
+export const uploadMailAttachmentSchema = {
+  headers: authenticatedHeaders,
+  body: {
+    type: 'object', additionalProperties: false, required: ['name', 'mimeType', 'data'],
+    properties: {
+      name: { type: 'string', minLength: 1, maxLength: 255, pattern: '^[^/\\\\\x00-\x1F\x7F]+$' },
+      mimeType: { type: 'string', minLength: 3, maxLength: 255, pattern: '^[A-Za-z0-9!#$&^_.+-]+/[A-Za-z0-9!#$&^_.+-]+$' },
+      data: { type: 'string', minLength: 4, maxLength: 2_796_208, pattern: '^[A-Za-z0-9+/]+={0,2}$' },
+    },
+  },
+} as const;
+
+export const discardMailAttachmentsSchema = {
+  headers: authenticatedHeaders,
+  body: { type: 'object', additionalProperties: false, required: ['tokens'], properties: { tokens: { type: 'array', maxItems: 10, uniqueItems: true, items: attachmentToken } } },
+} as const;
+
+export const sendMailSchema = {
+  headers: authenticatedHeaders,
+  body: {
+    type: 'object', additionalProperties: false,
+    required: ['accountId', 'to', 'cc', 'bcc', 'subject', 'body', 'attachmentTokens'],
+    properties: {
+      accountId: mailAccountId, to: { ...recipientArray, minItems: 1 }, cc: recipientArray, bcc: recipientArray,
+      subject: { type: 'string', maxLength: 500, pattern: '^[^\\x00-\\x1F\\x7F]*$' },
+      body: { type: 'string', maxLength: 200_000, pattern: '^[^\\x00]*$' },
+      attachmentTokens: { type: 'array', maxItems: 10, uniqueItems: true, items: attachmentToken },
+    },
+  },
+} as const;

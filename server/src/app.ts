@@ -6,22 +6,24 @@ import Fastify from 'fastify';
 import { AuthenticationError, authenticateDevice, registerDevice } from './auth.js';
 import type { ServerConfig } from './config.js';
 import { createDatabase } from './database.js';
+import { createMailAttachmentRegistry, MailAttachmentNotFoundError, type AttachmentUploadInput, type MailAttachmentRegistry } from './mail-compose.js';
 import { createMailOAuthService, type MailOAuthService, type OAuthMailProvider } from './mail-oauth.js';
 import { createMailService, MailConfigurationError, MailConnectionError, MailNotFoundError, type ConnectImapInput, type MailService } from './mail-service.js';
-import { connectImapSchema, mailAccountListSchema, mailAccountParamsSchema, mailMessageParamsSchema, mailOAuthCallbackSchema, mailOAuthStatusSchema, mailSyncSchema, registerDeviceSchema, startMailOAuthSchema, syncSchema } from './schemas.js';
+import { connectImapSchema, discardMailAttachmentsSchema, mailAccountListSchema, mailAccountParamsSchema, mailMessageParamsSchema, mailOAuthCallbackSchema, mailOAuthStatusSchema, mailSyncSchema, registerDeviceSchema, sendMailSchema, startMailOAuthSchema, syncSchema, uploadMailAttachmentSchema } from './schemas.js';
 import { synchronize } from './sync-service.js';
-import type { SyncRequestBody } from './types.js';
+import type { OutgoingMailInput, SyncRequestBody } from './types.js';
 
 interface RegisterBody {
   setupCode: string;
   name: string;
 }
 
-export async function buildApp(config: ServerConfig, dependencies: { mailService?: MailService; mailOAuthService?: MailOAuthService } = {}) {
+export async function buildApp(config: ServerConfig, dependencies: { mailService?: MailService; mailOAuthService?: MailOAuthService; mailAttachmentRegistry?: MailAttachmentRegistry } = {}) {
   const app = Fastify({ logger: config.logger, bodyLimit: 1024 * 1024 });
   const database = createDatabase(config.databasePath);
   const mailService = dependencies.mailService ?? createMailService(database, config);
   const mailOAuthService = dependencies.mailOAuthService ?? createMailOAuthService(database, config);
+  const mailAttachmentRegistry = dependencies.mailAttachmentRegistry ?? createMailAttachmentRegistry();
 
   await app.register(helmet, { global: true });
   await app.register(cors, {
@@ -113,6 +115,34 @@ export async function buildApp(config: ServerConfig, dependencies: { mailService
     return { status: 'success', data: content };
   });
 
+  app.post<{ Body: AttachmentUploadInput }>('/v1/mail/attachments', {
+    schema: uploadMailAttachmentSchema,
+    bodyLimit: 2_900_000,
+    config: { rateLimit: { max: 20, timeWindow: '15 minutes' } },
+  }, async (request, reply) => {
+    const device = authenticateDevice(database, request);
+    return reply.code(201).send({ status: 'success', data: mailAttachmentRegistry.upload(device.id, request.body) });
+  });
+
+  app.delete<{ Body: { tokens: string[] } }>('/v1/mail/attachments', { schema: discardMailAttachmentsSchema }, async (request, reply) => {
+    const device = authenticateDevice(database, request);
+    mailAttachmentRegistry.discard(device.id, request.body.tokens);
+    return reply.code(204).send();
+  });
+
+  app.post<{ Body: OutgoingMailInput & { accountId: string; attachmentTokens: string[] } }>('/v1/mail/send', {
+    schema: sendMailSchema,
+    config: { rateLimit: { max: 5, timeWindow: '1 minute' } },
+  }, async (request, reply) => {
+    const device = authenticateDevice(database, request);
+    const { accountId, attachmentTokens, ...input } = request.body;
+    await mailAttachmentRegistry.withClaim(device.id, attachmentTokens, async (attachments) => {
+      if (mailService.accounts().some((account) => account.id === accountId)) await mailService.send(accountId, input, attachments);
+      else await mailOAuthService.send(accountId, input, attachments);
+    });
+    return reply.code(202).send({ status: 'success', data: { accepted: true } });
+  });
+
   app.delete<{ Params: { accountId: string } }>('/v1/mail/accounts/:accountId', { schema: mailAccountParamsSchema }, async (request, reply) => {
     authenticateDevice(database, request);
     if (mailService.accounts().some((account) => account.id === request.params.accountId)) mailService.remove(request.params.accountId);
@@ -130,7 +160,7 @@ export async function buildApp(config: ServerConfig, dependencies: { mailService
     if (error instanceof AuthenticationError) {
       return reply.code(401).send({ status: 'error', message: 'Authentication failed' });
     }
-    if (error instanceof MailNotFoundError) return reply.code(404).send({ status: 'error', message: 'Mail resource not found' });
+    if (error instanceof MailNotFoundError || error instanceof MailAttachmentNotFoundError) return reply.code(404).send({ status: 'error', message: 'Mail resource not found' });
     if (error instanceof MailConnectionError) return reply.code(422).send({ status: 'error', message: 'Mail connection failed' });
     if (error instanceof MailConfigurationError) return reply.code(503).send({ status: 'error', message: 'Mail connector unavailable' });
     if ((error as { validation?: unknown }).validation || error instanceof TypeError) {

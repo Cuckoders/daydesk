@@ -17,6 +17,8 @@ export default function MailReaderScreen() {
   const account = useDayDeskStore((state) => state.accounts.find((item) => item.id === params.accountId));
   const markMailRead = useDayDeskStore((state) => state.markMailRead);
   const [content, setContent] = useState<MailContent>(); const [loading, setLoading] = useState(Boolean(message)); const [error, setError] = useState('');
+  const replyTo = message?.replyTo ?? message?.sender.match(/<([^<>\s]+@[^<>\s]+)>/)?.[1] ?? (message?.sender.match(/^[^\s@]+@[^\s@]+\.[^\s@]+$/)?.[0]);
+  const reply = () => { if (message && account && replyTo) router.push({ pathname: '/mail-compose', params: { accountId: account.id, to: replyTo, subject: /^re:/i.test(message.subject) ? message.subject : `Re: ${message.subject}`, reply: 'true' } } as never); };
 
   useEffect(() => {
     if (!message || !params.accountId || !params.messageId) return;
@@ -27,7 +29,7 @@ export default function MailReaderScreen() {
   }, [markMailRead, params.accountId, params.messageId]);
 
   return <SafeAreaView style={[styles.safeArea, { backgroundColor: colors.background }]}>
-    <View style={[styles.navigation, { borderBottomColor: colors.border }]}><Pressable accessibilityLabel="Закрыть письмо" accessibilityRole="button" onPress={() => router.back()} style={styles.navButton}><Ionicons name="close" size={25} color={colors.text} /></Pressable><Text numberOfLines={1} style={[styles.navTitle, { color: colors.text }]}>{account?.label ?? 'Письмо'}</Text><View style={styles.navButton} /></View>
+    <View style={[styles.navigation, { borderBottomColor: colors.border }]}><Pressable accessibilityLabel="Закрыть письмо" accessibilityRole="button" onPress={() => router.back()} style={styles.navButton}><Ionicons name="close" size={25} color={colors.text} /></Pressable><Text numberOfLines={1} style={[styles.navTitle, { color: colors.text }]}>{account?.label ?? 'Письмо'}</Text>{replyTo ? <Pressable accessibilityLabel="Ответить" accessibilityRole="button" onPress={reply} style={styles.navButton}><Ionicons name="arrow-undo-outline" size={23} color={colors.primary} /></Pressable> : <View style={styles.navButton} />}</View>
     {!message ? <View style={styles.center}><Ionicons name="mail-unread-outline" size={38} color={colors.textMuted} /><Text style={[styles.missingTitle, { color: colors.text }]}>Письмо не найдено</Text><Text style={[styles.missingText, { color: colors.textMuted }]}>Обновите входящие и откройте письмо снова.</Text></View> : <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
       <View style={styles.senderRow}><View style={[styles.avatar, { backgroundColor: colors.primarySoft }]}><Text style={[styles.avatarText, { color: colors.primary }]}>{message.sender.slice(0, 1).toUpperCase()}</Text></View><View style={styles.senderCopy}><Text style={[styles.sender, { color: colors.text }]}>{message.sender}</Text><Text style={[styles.date, { color: colors.textMuted }]}>{formatLongDate(new Date(message.receivedAt))}, {formatTime(message.receivedAt)}</Text></View>{message.starred ? <Ionicons name="star" size={20} color={colors.warning} /> : null}</View>
       <Text style={[styles.subject, { color: colors.text }]}>{message.subject}</Text>

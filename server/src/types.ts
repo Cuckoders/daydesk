@@ -111,9 +111,25 @@ export interface MailMessage {
   receivedAt: string;
   unread: boolean;
   starred: boolean;
+  replyTo?: string;
 }
 
 export interface MailContent {
   body: string;
   hasAttachments: boolean;
+}
+
+export interface OutgoingMailAttachment {
+  name: string;
+  mimeType: string;
+  size: number;
+  content: Buffer;
+}
+
+export interface OutgoingMailInput {
+  to: string[];
+  cc: string[];
+  bcc: string[];
+  subject: string;
+  body: string;
 }

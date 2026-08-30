@@ -45,6 +45,7 @@ export default function RootLayout() {
         <Stack.Screen name="mail-accounts" options={{ headerShown: false }} />
         <Stack.Screen name="mail-account-editor" options={{ presentation: 'modal', title: 'Почта', headerShown: false, gestureEnabled: true }} />
         <Stack.Screen name="mail-reader" options={{ presentation: 'modal', title: 'Письмо', headerShown: false, gestureEnabled: true }} />
+        <Stack.Screen name="mail-compose" options={{ presentation: 'modal', title: 'Новое письмо', headerShown: false, gestureEnabled: true }} />
         <Stack.Screen name="sync-settings" options={{ presentation: 'modal', headerShown: false, gestureEnabled: true }} />
       </Stack>
     </ThemeProvider>

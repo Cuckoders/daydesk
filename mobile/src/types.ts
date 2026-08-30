@@ -83,11 +83,29 @@ export interface MailMessage {
   receivedAt: string;
   unread: boolean;
   starred: boolean;
+  replyTo?: string;
 }
 
 export interface MailContent {
   body: string;
   hasAttachments: boolean;
+}
+
+export interface OutgoingMailAttachment {
+  token: string;
+  name: string;
+  mimeType: string;
+  size: number;
+}
+
+export interface OutgoingMailInput {
+  accountId: string;
+  to: string[];
+  cc: string[];
+  bcc: string[];
+  subject: string;
+  body: string;
+  attachmentTokens: string[];
 }
 
 export interface SyncOperation {

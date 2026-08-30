@@ -18,7 +18,7 @@ DAYDESK_MICROSOFT_CLIENT_SECRET=...
 
 В Google Cloud зарегистрируйте `https://sync.example.com/v1/mail/oauth/callback/gmail`, а в Microsoft Entra — `https://sync.example.com/v1/mail/oauth/callback/outlook`. URI должен в точности соответствовать `DAYDESK_OAUTH_PUBLIC_URL`; production-сервер обязан быть доступен по HTTPS.
 
-Mobile-поток запрашивает только чтение почты: Google `gmail.readonly`, Microsoft `User.Read`, `Mail.Read` и `offline_access`. После завершения сервер шифрует access/refresh-токены ключом `DAYDESK_MAIL_KEY`; телефон получает только метаданные подключённого аккаунта.
+Mobile-поток запрашивает Google `gmail.readonly` и `gmail.send`, Microsoft `User.Read`, `Mail.Read`, `Mail.Send` и `offline_access`. После завершения сервер шифрует access/refresh-токены ключом `DAYDESK_MAIL_KEY`; телефон получает только метаданные подключённого аккаунта. Аккаунты, подключённые к read-only версии mobile, нужно один раз переподключить.
 
 ## Google / Gmail
 

@@ -60,6 +60,7 @@ test('mail API requires device authentication and validates connection input', a
     accounts: () => [account],
     synchronize: async () => ({ accounts: [account], messages: [message(account.id)], serverTime: '2026-08-30T12:00:00.000Z' }),
     content: async () => ({ body: 'Текст письма', hasAttachments: false }),
+    send: async () => undefined,
     remove: () => undefined,
   };
   const app = await buildApp(config, { mailService: fake });
@@ -85,6 +86,7 @@ test('OAuth mail flow binds state to a device and encrypts offline credentials',
   const oauthConfig: ServerConfig = { ...config, oauthPublicUrl: 'https://sync.example.com', googleClientId: 'google-client' };
   let receivedVerifier = '';
   let refreshedWith = '';
+  let sentMime = '';
   const adapter: OAuthProviderAdapter = {
     authorizationUrl: ({ state, challenge, redirectUri }) => {
       const url = new URL('https://accounts.example/authorize');
@@ -102,6 +104,7 @@ test('OAuth mail flow binds state to a device and encrypts offline credentials',
     profile: async () => ({ address: 'user@gmail.com', label: 'Gmail' }),
     messages: async (_accessToken, accountId) => [message(accountId)],
     content: async () => ({ body: 'Строка 1\nСтрока 2', hasAttachments: true }),
+    send: async (_accessToken, mime) => { sentMime = mime.toString('utf8'); },
   };
   const service = createMailOAuthService(database, oauthConfig, { gmail: adapter });
   const device = registerDevice(database, oauthConfig, oauthConfig.setupCode, 'iPhone');
@@ -132,6 +135,12 @@ test('OAuth mail flow binds state to a device and encrypts offline credentials',
   assert.equal(refreshedWith, 'refresh-secret');
   assert.equal(snapshot.messages[0]?.subject, 'Проверка почты');
   assert.deepEqual(await service.content(status.account?.id ?? '', '42'), { body: 'Строка 1\nСтрока 2', hasAttachments: true });
+  await service.send(status.account?.id ?? '', { to: ['friend@example.com'], cc: [], bcc: ['hidden@example.com'], subject: 'План', body: 'Текст' }, [
+    { name: 'plan.txt', mimeType: 'text/plain', size: 4, content: Buffer.from('file') },
+  ]);
+  assert.match(sentMime, /Subject: =\?UTF-8\?/);
+  assert.match(sentMime, /plan\.txt/);
+  assert.match(sentMime, /Bcc: hidden@example\.com/);
   assert.equal(await service.complete('gmail', { state, code: 'replay' }), false);
 });
 
@@ -139,6 +148,7 @@ test('OAuth mail API exposes provider flow and accepts provider callback metadat
   const account: MailAccount = { id: '123e4567-e89b-42d3-a456-426614174001', provider: 'gmail', label: 'Gmail', address: 'user@gmail.com' };
   const flowId = '123e4567-e89b-42d3-a456-426614174002';
   let callbackReceived = false;
+  let outgoing: { subject: string; attachmentName?: string } | undefined;
   const oauth: MailOAuthService = {
     configuredProviders: () => ['gmail'],
     start: () => ({ flowId, authorizationUrl: 'https://accounts.google.com/o/oauth2/v2/auth', expiresAt: '2026-08-30T13:00:00.000Z' }),
@@ -147,12 +157,14 @@ test('OAuth mail API exposes provider flow and accepts provider callback metadat
     accounts: () => [account],
     synchronize: async () => ({ accounts: [account], messages: [message(account.id)], serverTime: '2026-08-30T12:00:00.000Z' }),
     content: async () => ({ body: 'Текст', hasAttachments: false }),
+    send: async (_accountId, input, attachments) => { outgoing = { subject: input.subject, ...(attachments[0] ? { attachmentName: attachments[0].name } : {}) }; },
     remove: () => undefined,
   };
   const imap: MailService = {
     connectImap: async () => { throw new Error('Not used'); }, accounts: () => [],
     synchronize: async () => ({ accounts: [], messages: [], serverTime: '2026-08-30T12:00:00.000Z' }),
     content: async () => { throw new Error('Not used'); }, remove: () => undefined,
+    send: async () => { throw new Error('Not used'); },
   };
   const app = await buildApp(config, { mailService: imap, mailOAuthService: oauth });
   apps.push(app);
@@ -168,4 +180,24 @@ test('OAuth mail API exposes provider flow and accepts provider callback metadat
   assert.equal(callback.statusCode, 200);
   assert.match(callback.body, /DayDesk подключён/);
   assert.equal(callbackReceived, true);
+  const upload = await app.inject({ method: 'POST', url: '/v1/mail/attachments', headers, payload: { name: 'note.txt', mimeType: 'text/plain', data: Buffer.from('hello').toString('base64') } });
+  assert.equal(upload.statusCode, 201);
+  const token = upload.json().data.token as string;
+  assert.equal((await app.inject({ method: 'POST', url: '/v1/mail/attachments', payload: { name: 'x.txt', mimeType: 'text/plain', data: 'eA==' } })).statusCode, 401);
+  const secondRegistration = await app.inject({ method: 'POST', url: '/v1/devices/register', payload: { setupCode: config.setupCode, name: 'Another device' } });
+  const secondDevice = secondRegistration.json().data as { id: string; token: string };
+  const secondHeaders = { authorization: `Bearer ${secondDevice.token}`, 'x-device-id': secondDevice.id };
+  const crossDevice = await app.inject({ method: 'POST', url: '/v1/mail/send', headers: secondHeaders, payload: {
+    accountId: account.id, to: ['friend@example.com'], cc: [], bcc: [], subject: 'План', body: 'Привет', attachmentTokens: [token],
+  } });
+  assert.equal(crossDevice.statusCode, 404);
+  const sent = await app.inject({ method: 'POST', url: '/v1/mail/send', headers, payload: {
+    accountId: account.id, to: ['friend@example.com'], cc: [], bcc: [], subject: 'План', body: 'Привет', attachmentTokens: [token],
+  } });
+  assert.equal(sent.statusCode, 202);
+  assert.deepEqual(outgoing, { subject: 'План', attachmentName: 'note.txt' });
+  const replay = await app.inject({ method: 'POST', url: '/v1/mail/send', headers, payload: {
+    accountId: account.id, to: ['friend@example.com'], cc: [], bcc: [], subject: 'План', body: 'Привет', attachmentTokens: [token],
+  } });
+  assert.equal(replay.statusCode, 404);
 });

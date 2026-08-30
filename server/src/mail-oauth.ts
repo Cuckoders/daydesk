@@ -4,8 +4,9 @@ import { simpleParser } from 'mailparser';
 
 import type { ServerConfig } from './config.js';
 import type { DayDeskDatabase } from './database.js';
+import { buildMimeMessage } from './mail-compose.js';
 import { decryptSecret, encryptSecret, MailConfigurationError, MailConnectionError, MailNotFoundError } from './mail-service.js';
-import type { MailAccount, MailContent, MailMessage } from './types.js';
+import type { MailAccount, MailContent, MailMessage, OutgoingMailAttachment, OutgoingMailInput } from './types.js';
 
 export type OAuthMailProvider = 'gmail' | 'outlook';
 type OAuthFlowStatus = 'pending' | 'processing' | 'completed' | 'failed';
@@ -20,6 +21,10 @@ const tokenTextLimit = 32_768;
 const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const safeText = (value: string, limit: number) => value.replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, limit);
 const safeBody = (value: string) => value.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '').trim().slice(0, MAX_BODY_CHARACTERS);
+const replyAddress = (value: string) => {
+  const candidate = value.match(/<([^<>\s]+@[^<>\s]+)>/)?.[1] ?? value.match(/[^\s<>]+@[^\s<>]+\.[^\s<>]+/)?.[0];
+  return candidate && candidate.length <= 320 && emailPattern.test(candidate) ? candidate.toLowerCase() : undefined;
+};
 
 interface OAuthAccountRow {
   id: string;
@@ -56,6 +61,7 @@ export interface OAuthProviderAdapter {
   profile(accessToken: string): Promise<OAuthProfile>;
   messages(accessToken: string, accountId: string): Promise<MailMessage[]>;
   content(accessToken: string, messageId: string): Promise<MailContent>;
+  send(accessToken: string, mime: Buffer): Promise<void>;
 }
 
 type OAuthAdapters = Partial<Record<OAuthMailProvider, OAuthProviderAdapter>>;
@@ -141,7 +147,7 @@ function createDefaultAdapter(config: ServerConfig, provider: OAuthMailProvider)
   const isGoogle = provider === 'gmail';
   const authorizationEndpoint = isGoogle ? 'https://accounts.google.com/o/oauth2/v2/auth' : 'https://login.microsoftonline.com/common/oauth2/v2.0/authorize';
   const tokenEndpoint = isGoogle ? 'https://oauth2.googleapis.com/token' : 'https://login.microsoftonline.com/common/oauth2/v2.0/token';
-  const scope = isGoogle ? 'https://www.googleapis.com/auth/gmail.readonly' : 'offline_access User.Read Mail.Read';
+  const scope = isGoogle ? 'https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/gmail.send' : 'offline_access User.Read Mail.Read Mail.Send';
 
   const tokenRequest = async (parameters: Record<string, string>, previousRefreshToken?: string) => {
     const body = new URLSearchParams({ client_id: configured.clientId, scope, ...parameters });
@@ -185,8 +191,10 @@ function createDefaultAdapter(config: ServerConfig, provider: OAuthMailProvider)
           const labelIds = Array.isArray(item.labelIds) ? item.labelIds.filter((label): label is string => typeof label === 'string') : [];
           const receivedAt = new Date(Number(item.internalDate));
           if (!Number.isFinite(receivedAt.getTime())) continue;
+          const replyTo = replyAddress(headers.get('from') ?? '');
           messages.push({ id: opaqueMessageId(item.id), accountId, sender: safeText(headers.get('from') ?? 'Без отправителя', 500), subject: safeText(headers.get('subject') ?? 'Без темы', 1_000),
-            preview: typeof item.snippet === 'string' ? safeText(item.snippet, 300) : '', receivedAt: receivedAt.toISOString(), unread: labelIds.includes('UNREAD'), starred: labelIds.includes('STARRED') });
+            preview: typeof item.snippet === 'string' ? safeText(item.snippet, 300) : '', receivedAt: receivedAt.toISOString(), unread: labelIds.includes('UNREAD'), starred: labelIds.includes('STARRED'),
+            ...(replyTo ? { replyTo } : {}) });
         }
         return messages.sort((a, b) => b.receivedAt.localeCompare(a.receivedAt));
       }
@@ -199,10 +207,11 @@ function createDefaultAdapter(config: ServerConfig, provider: OAuthMailProvider)
         if (!record(item) || typeof item.id !== 'string' || item.id.length > 1024 || typeof item.receivedDateTime !== 'string' || typeof item.isRead !== 'boolean') return [];
         const from = record(item.from) && record(item.from.emailAddress) ? item.from.emailAddress : undefined;
         const sender = from && (typeof from.name === 'string' ? from.name : typeof from.address === 'string' ? from.address : undefined);
+        const replyTo = from && typeof from.address === 'string' && emailPattern.test(from.address) ? from.address.toLowerCase() : undefined;
         const receivedAt = new Date(item.receivedDateTime); if (!Number.isFinite(receivedAt.getTime())) return [];
         return [{ id: opaqueMessageId(item.id), accountId, sender: safeText(sender ?? 'Без отправителя', 500), subject: safeText(typeof item.subject === 'string' ? item.subject : 'Без темы', 1_000),
           preview: safeText(typeof item.bodyPreview === 'string' ? item.bodyPreview : '', 300), receivedAt: receivedAt.toISOString(), unread: !item.isRead,
-          starred: record(item.flag) && item.flag.flagStatus === 'flagged' }];
+          starred: record(item.flag) && item.flag.flagStatus === 'flagged', ...(replyTo ? { replyTo } : {}) }];
       }).sort((a, b) => b.receivedAt.localeCompare(a.receivedAt));
     },
     content: async (accessToken, messageId) => {
@@ -221,6 +230,18 @@ function createDefaultAdapter(config: ServerConfig, provider: OAuthMailProvider)
       if (!record(value) || !record(value.body) || typeof value.body.content !== 'string' || typeof value.hasAttachments !== 'boolean') throw new MailConnectionError('Outlook returned invalid message');
       return { body: safeBody(value.body.content) || 'В письме нет текстового содержимого.', hasAttachments: value.hasAttachments };
     },
+    send: async (accessToken, mime) => {
+      if (isGoogle) {
+        await providerRequest('https://gmail.googleapis.com/gmail/v1/users/me/messages/send', {
+          method: 'POST', headers: bearer(accessToken, { 'content-type': 'application/json' }),
+          body: JSON.stringify({ raw: mime.toString('base64url') }),
+        });
+        return;
+      }
+      await providerRequest('https://graph.microsoft.com/v1.0/me/sendMail', {
+        method: 'POST', headers: bearer(accessToken, { 'content-type': 'text/plain' }), body: mime.toString('base64'),
+      });
+    },
   };
 }
 
@@ -232,6 +253,7 @@ export interface MailOAuthService {
   accounts(): MailAccount[];
   synchronize(accountId?: string): Promise<{ accounts: MailAccount[]; messages: MailMessage[]; serverTime: string }>;
   content(accountId: string, messageId: string): Promise<MailContent>;
+  send(accountId: string, input: OutgoingMailInput, attachments: OutgoingMailAttachment[]): Promise<void>;
   remove(accountId: string): void;
 }
 
@@ -329,6 +351,7 @@ export function createMailOAuthService(database: DayDeskDatabase, config: Server
       return { accounts: selected.map(accountFromRow), messages: messages.sort((a, b) => b.receivedAt.localeCompare(a.receivedAt)), serverTime: now };
     },
     content: async (accountId, messageId) => { const account = row(accountId); return adapter(account.provider).content(await accessToken(account), messageId); },
+    send: async (accountId, input, attachments) => { const account = row(accountId); const mime = await buildMimeMessage(account.address, input, attachments, true); await adapter(account.provider).send(await accessToken(account), mime); },
     remove: (accountId) => { const result = database.prepare('DELETE FROM oauth_mail_accounts WHERE id = ?').run(accountId); if (!result.changes) throw new MailNotFoundError('Mail account not found'); },
   };
 }
