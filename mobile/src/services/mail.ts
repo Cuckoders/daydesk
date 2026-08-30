@@ -1,7 +1,8 @@
-import { File } from 'expo-file-system';
+import { Directory, File, Paths } from 'expo-file-system';
+import * as Sharing from 'expo-sharing';
 
 import { authenticatedRequest } from '@/src/services/sync';
-import type { MailAccount, MailContent, MailMessage, OutgoingMailAttachment, OutgoingMailInput } from '@/src/types';
+import type { IncomingMailAttachment, MailAccount, MailContent, MailFolder, MailMessage, OutgoingMailAttachment, OutgoingMailInput } from '@/src/types';
 
 export type OAuthMailProvider = 'gmail' | 'outlook';
 
@@ -25,6 +26,9 @@ const hostPattern = /^(?=.{1,253}$)(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9
 const controlCharacters = /[\u0000-\u001f\u007f]/;
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const attachmentTokenPattern = /^[A-Za-z0-9_-]{43}$/;
+const messageIdPattern = /^[A-Za-z0-9_-]{1,2048}$/;
+const incomingAttachmentIdPattern = /^[1-9][0-9]{0,2}$/;
+const mimeTypePattern = /^[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]{0,126}\/[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]{0,126}$/;
 const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value);
 
 function readEnvelope(value: unknown) {
@@ -50,7 +54,8 @@ function readMessage(value: unknown): MailMessage {
   if (!isRecord(value) || typeof value.id !== 'string' || typeof value.accountId !== 'string' || typeof value.sender !== 'string'
     || typeof value.subject !== 'string' || typeof value.preview !== 'string' || typeof value.receivedAt !== 'string'
     || typeof value.unread !== 'boolean' || typeof value.starred !== 'boolean' || value.sender.length > 500 || value.subject.length > 1_000
-    || value.preview.length > 300 || !/^[A-Za-z0-9_-]{1,2048}$/.test(value.id) || !uuidPattern.test(value.accountId)
+    || value.preview.length > 300 || !messageIdPattern.test(value.id) || !uuidPattern.test(value.accountId)
+    || !['inbox', 'sent'].includes(String(value.folder))
     || (value.replyTo !== undefined && (typeof value.replyTo !== 'string' || value.replyTo.length > 320 || !emailPattern.test(value.replyTo)))
     || !Number.isFinite(Date.parse(value.receivedAt))) throw new Error('Сервер вернул некорректное письмо');
   return value as unknown as MailMessage;
@@ -74,9 +79,9 @@ export async function connectImap(input: ConnectImapInput) {
   return { account: readAccount(data.account), messages: data.messages.map(readMessage) };
 }
 
-export async function synchronizeMail(accountId?: string) {
+export async function synchronizeMail(accountId?: string, folder: MailFolder = 'inbox') {
   if (accountId && !uuidPattern.test(accountId)) throw new Error('Некорректный аккаунт');
-  return readSnapshot(await authenticatedRequest<unknown>('/v1/mail/sync', { method: 'POST', body: JSON.stringify(accountId ? { accountId } : {}) }));
+  return readSnapshot(await authenticatedRequest<unknown>('/v1/mail/sync', { method: 'POST', body: JSON.stringify({ ...(accountId ? { accountId } : {}), folder }) }));
 }
 
 export async function loadMailAccounts() {
@@ -85,11 +90,57 @@ export async function loadMailAccounts() {
   return data.accounts.map(readAccount);
 }
 
-export async function loadMailContent(accountId: string, messageId: string): Promise<MailContent> {
-  if (!uuidPattern.test(accountId) || !/^[A-Za-z0-9_-]{1,2048}$/.test(messageId)) throw new Error('Некорректное письмо');
-  const data = readEnvelope(await authenticatedRequest<unknown>(`/v1/mail/messages/${accountId}/${messageId}`));
-  if (typeof data.body !== 'string' || data.body.length > 200_000 || typeof data.hasAttachments !== 'boolean') throw new Error('Сервер вернул некорректное письмо');
-  return { body: data.body, hasAttachments: data.hasAttachments };
+function readIncomingAttachment(value: unknown): IncomingMailAttachment {
+  if (!isRecord(value) || typeof value.id !== 'string' || !incomingAttachmentIdPattern.test(value.id) || typeof value.name !== 'string'
+    || !value.name || value.name.length > 255 || controlCharacters.test(value.name) || /[/\\]/.test(value.name)
+    || typeof value.mimeType !== 'string' || !mimeTypePattern.test(value.mimeType) || typeof value.size !== 'number'
+    || !Number.isInteger(value.size) || value.size < 0 || value.size > 100 * 1024 * 1024 || typeof value.downloadable !== 'boolean') {
+    throw new Error('Сервер вернул некорректное вложение');
+  }
+  return value as unknown as IncomingMailAttachment;
+}
+
+export async function loadMailContent(accountId: string, messageId: string, folder: MailFolder = 'inbox'): Promise<MailContent> {
+  if (!uuidPattern.test(accountId) || !messageIdPattern.test(messageId)) throw new Error('Некорректное письмо');
+  const data = readEnvelope(await authenticatedRequest<unknown>(`/v1/mail/messages/${accountId}/${messageId}?folder=${folder}`, { cache: 'no-store' }));
+  if (typeof data.body !== 'string' || data.body.length > 200_000 || typeof data.hasAttachments !== 'boolean' || !Array.isArray(data.attachments)
+    || data.attachments.length > 20) throw new Error('Сервер вернул некорректное письмо');
+  const attachments = data.attachments.map(readIncomingAttachment);
+  if (data.hasAttachments !== (attachments.length > 0)) throw new Error('Сервер вернул некорректное письмо');
+  return { body: data.body, hasAttachments: data.hasAttachments, attachments };
+}
+
+function decodeBase64(value: string) {
+  let binary: string;
+  try { binary = atob(value); } catch { throw new Error('Сервер вернул повреждённое вложение'); }
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+  return bytes;
+}
+
+export async function shareMailAttachment(accountId: string, messageId: string, folder: MailFolder, expected: IncomingMailAttachment) {
+  if (!uuidPattern.test(accountId) || !messageIdPattern.test(messageId) || !incomingAttachmentIdPattern.test(expected.id) || !expected.downloadable) throw new Error('Это вложение нельзя скачать');
+  const data = readEnvelope(await authenticatedRequest<unknown>(`/v1/mail/messages/${accountId}/${messageId}/attachments/${expected.id}?folder=${folder}`, { cache: 'no-store' }));
+  if (typeof data.id !== 'string' || data.id !== expected.id || typeof data.name !== 'string' || data.name !== expected.name
+    || typeof data.mimeType !== 'string' || data.mimeType !== expected.mimeType || typeof data.size !== 'number' || data.size !== expected.size
+    || data.size < 1 || data.size > 2 * 1024 * 1024 || typeof data.data !== 'string' || data.data.length > 2_796_208 || !/^[A-Za-z0-9+/]+={0,2}$/.test(data.data)) {
+    throw new Error('Сервер вернул некорректное вложение');
+  }
+  const bytes = decodeBase64(data.data);
+  if (bytes.length !== data.size) throw new Error('Вложение загружено не полностью');
+  const available = await Sharing.isAvailableAsync();
+  if (!available) throw new Error('Системное меню файлов недоступно на этом устройстве');
+  const directory = new Directory(Paths.cache, 'daydesk-attachments'); directory.create({ idempotent: true, intermediates: true });
+  const suffix = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+  const name = `${suffix}-${expected.name}`; const file = new File(directory, name);
+  file.create();
+  try {
+    file.write(bytes);
+    await Sharing.shareAsync(file.uri, { mimeType: expected.mimeType, dialogTitle: `Сохранить ${expected.name}` });
+  } finally {
+    bytes.fill(0);
+    if (file.exists) file.delete();
+  }
 }
 
 export async function disconnectMailAccount(accountId: string) {

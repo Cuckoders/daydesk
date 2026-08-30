@@ -9,14 +9,16 @@ import nodemailer from 'nodemailer';
 import type { ServerConfig } from './config.js';
 import type { DayDeskDatabase } from './database.js';
 import { buildMimeMessage } from './mail-compose.js';
-import type { MailAccount, MailContent, MailMessage, OutgoingMailAttachment, OutgoingMailInput } from './types.js';
+import type { IncomingMailAttachment, IncomingMailAttachmentData, MailAccount, MailContent, MailFolder, MailMessage, OutgoingMailAttachment, OutgoingMailInput } from './types.js';
 
 const MAIL_LIMIT = 50;
 const ACCOUNT_LIMIT = 20;
 const PREVIEW_SOURCE_BYTES = 64 * 1024;
 const MESSAGE_SOURCE_BYTES = 2 * 1024 * 1024;
 const MAX_BODY_CHARACTERS = 200_000;
+const ATTACHMENT_LIMIT = 20;
 const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const mimeTypePattern = /^[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]{0,126}\/[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]{0,126}$/;
 const blockedAddresses = new BlockList();
 for (const [network, prefix] of [
   ['0.0.0.0', 8], ['10.0.0.0', 8], ['100.64.0.0', 10], ['127.0.0.0', 8], ['169.254.0.0', 16],
@@ -66,8 +68,9 @@ interface ImapMailAccount extends MailAccount {
 }
 
 export interface MailTransport {
-  list(connection: StoredConnection): Promise<MailMessage[]>;
-  content(connection: StoredConnection, messageId: string): Promise<MailContent>;
+  list(connection: StoredConnection, folder: MailFolder): Promise<MailMessage[]>;
+  content(connection: StoredConnection, messageId: string, folder: MailFolder): Promise<MailContent>;
+  attachment(connection: StoredConnection, messageId: string, attachmentId: string, folder: MailFolder): Promise<IncomingMailAttachmentData>;
 }
 
 export class MailConfigurationError extends Error {}
@@ -137,6 +140,32 @@ function senderAddress(message: FetchMessageObject) {
   return address && address.length <= 320 && emailPattern.test(address) ? address.toLowerCase() : undefined;
 }
 
+function recipientName(message: FetchMessageObject) {
+  const recipient = message.envelope?.to?.[0];
+  const value = recipient?.name?.trim() || recipient?.address?.trim() || 'Без получателя';
+  return `Кому: ${value.replace(/[\u0000-\u001f\u007f]/g, '').slice(0, 494)}`;
+}
+
+function safeAttachmentName(value: string | undefined, index: number) {
+  const clean = (value ?? '').replace(/[\u0000-\u001f\u007f/\\]/g, '_').trim().slice(0, 255);
+  return clean || `attachment-${index}`;
+}
+function safeMimeType(value: string) {
+  const clean = value.replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, 255);
+  return mimeTypePattern.test(clean) ? clean : 'application/octet-stream';
+}
+
+function visibleAttachments(attachments: Awaited<ReturnType<typeof simpleParser>>['attachments']) {
+  return attachments.filter((item) => !item.related && item.contentDisposition !== 'inline').slice(0, ATTACHMENT_LIMIT);
+}
+
+function attachmentMetadata(attachments: Awaited<ReturnType<typeof simpleParser>>['attachments']): IncomingMailAttachment[] {
+  return visibleAttachments(attachments).map((item, index) => ({
+    id: String(index + 1), name: safeAttachmentName(item.filename, index + 1),
+    mimeType: safeMimeType(item.contentType), size: item.content.length, downloadable: item.content.length > 0 && item.content.length <= MESSAGE_SOURCE_BYTES,
+  }));
+}
+
 async function previewFromSource(source?: Buffer) {
   if (!source?.length) return '';
   try {
@@ -177,9 +206,23 @@ function createImapTransport(config: ServerConfig): MailTransport {
     }
   };
 
+  const mailboxPath = async (client: ImapFlow, folder: MailFolder) => {
+    if (folder === 'inbox') return 'INBOX';
+    const mailboxes = await client.list();
+    return mailboxes.find((item) => item.specialUse === '\\Sent')?.path;
+  };
+
+  const parsedMessage = async (client: ImapFlow, messageId: string) => {
+    const message = await client.fetchOne(messageId, { source: { start: 0, maxLength: MESSAGE_SOURCE_BYTES } }, { uid: true });
+    if (message === false || !message.source) throw new MailNotFoundError('Mail message not found');
+    return simpleParser(message.source, { skipImageLinks: true, skipTextToHtml: true, maxHtmlLengthToParse: MESSAGE_SOURCE_BYTES });
+  };
+
   return {
-    list: (connection) => withClient(connection, async (client) => {
-      const lock = await client.getMailboxLock('INBOX', { readOnly: true, acquireTimeout: 10_000 });
+    list: (connection, folder) => withClient(connection, async (client) => {
+      const path = await mailboxPath(client, folder);
+      if (!path) return [];
+      const lock = await client.getMailboxLock(path, { readOnly: true, acquireTimeout: 10_000 });
       try {
         const total = client.mailbox ? client.mailbox.exists : 0;
         if (!total) return [];
@@ -190,10 +233,11 @@ function createImapTransport(config: ServerConfig): MailTransport {
         const messages = await Promise.all(loaded.map(async (message): Promise<MailMessage> => {
           const replyTo = senderAddress(message);
           return {
-            id: String(message.uid), accountId: connection.account.id, sender: senderName(message),
+            id: String(message.uid), accountId: connection.account.id, sender: folder === 'sent' ? recipientName(message) : senderName(message),
             subject: message.envelope?.subject?.trim().replace(/[\u0000-\u001f\u007f]/g, '').slice(0, 1_000) || 'Без темы',
             preview: await previewFromSource(message.source), receivedAt: new Date(message.envelope?.date ?? message.internalDate ?? Date.now()).toISOString(),
-            unread: !message.flags?.has('\\Seen'), starred: Boolean(message.flags?.has('\\Flagged')), ...(replyTo ? { replyTo } : {}),
+            unread: folder === 'inbox' && !message.flags?.has('\\Seen'), starred: Boolean(message.flags?.has('\\Flagged')), folder,
+            ...(folder === 'inbox' && replyTo ? { replyTo } : {}),
           };
         }));
         return messages.sort((left, right) => right.receivedAt.localeCompare(left.receivedAt));
@@ -201,15 +245,30 @@ function createImapTransport(config: ServerConfig): MailTransport {
         lock.release();
       }
     }),
-    content: (connection, messageId) => withClient(connection, async (client) => {
-      const lock = await client.getMailboxLock('INBOX', { acquireTimeout: 10_000 });
+    content: (connection, messageId, folder) => withClient(connection, async (client) => {
+      const path = await mailboxPath(client, folder);
+      if (!path) throw new MailNotFoundError('Mail folder not found');
+      const lock = await client.getMailboxLock(path, { acquireTimeout: 10_000 });
       try {
-        const message = await client.fetchOne(messageId, { source: { start: 0, maxLength: MESSAGE_SOURCE_BYTES } }, { uid: true });
-        if (message === false || !message.source) throw new MailNotFoundError('Mail message not found');
-        const parsed = await simpleParser(message.source, { skipImageLinks: true, skipTextToHtml: true, maxHtmlLengthToParse: MESSAGE_SOURCE_BYTES });
+        const parsed = await parsedMessage(client, messageId);
         const body = (parsed.text ?? '').replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '').trim().slice(0, MAX_BODY_CHARACTERS);
-        await client.messageFlagsAdd(messageId, ['\\Seen'], { uid: true });
-        return { body: body || 'В письме нет текстового содержимого.', hasAttachments: parsed.attachments.length > 0 };
+        if (folder === 'inbox') await client.messageFlagsAdd(messageId, ['\\Seen'], { uid: true });
+        const attachments = attachmentMetadata(parsed.attachments);
+        return { body: body || 'В письме нет текстового содержимого.', hasAttachments: attachments.length > 0, attachments };
+      } finally {
+        lock.release();
+      }
+    }),
+    attachment: (connection, messageId, attachmentId, folder) => withClient(connection, async (client) => {
+      const path = await mailboxPath(client, folder);
+      if (!path) throw new MailNotFoundError('Mail folder not found');
+      const lock = await client.getMailboxLock(path, { readOnly: true, acquireTimeout: 10_000 });
+      try {
+        const parsed = await parsedMessage(client, messageId);
+        const index = Number(attachmentId) - 1;
+        const selected = visibleAttachments(parsed.attachments)[index];
+        if (!Number.isInteger(index) || !selected || selected.content.length > MESSAGE_SOURCE_BYTES) throw new MailNotFoundError('Mail attachment not found');
+        return { id: attachmentId, name: safeAttachmentName(selected.filename, index + 1), mimeType: safeMimeType(selected.contentType), size: selected.content.length, downloadable: true, content: Buffer.from(selected.content) };
       } finally {
         lock.release();
       }
@@ -220,8 +279,9 @@ function createImapTransport(config: ServerConfig): MailTransport {
 export interface MailService {
   connectImap(input: ConnectImapInput): Promise<{ account: MailAccount; messages: MailMessage[] }>;
   accounts(): MailAccount[];
-  synchronize(accountId?: string): Promise<{ accounts: MailAccount[]; messages: MailMessage[]; serverTime: string }>;
-  content(accountId: string, messageId: string): Promise<MailContent>;
+  synchronize(accountId?: string, folder?: MailFolder): Promise<{ accounts: MailAccount[]; messages: MailMessage[]; serverTime: string }>;
+  content(accountId: string, messageId: string, folder?: MailFolder): Promise<MailContent>;
+  attachment(accountId: string, messageId: string, attachmentId: string, folder?: MailFolder): Promise<IncomingMailAttachmentData>;
   send(accountId: string, input: OutgoingMailInput, attachments: OutgoingMailAttachment[]): Promise<void>;
   remove(accountId: string): void;
 }
@@ -255,7 +315,7 @@ export function createMailService(database: DayDeskDatabase, config: ServerConfi
         id: randomUUID(), provider: 'imap', label: input.label.trim(), address: input.address.trim().toLowerCase(),
         host: input.host.trim().toLowerCase(), port: 993, username: input.username.trim(),
       };
-      const messages = await transport.list({ account, password: input.password });
+      const messages = await transport.list({ account, password: input.password }, 'inbox');
       const now = new Date().toISOString();
       database.prepare(`
         INSERT INTO mail_accounts (id, provider, label, address, host, port, username, encrypted_password, created_at, updated_at, last_synced_at)
@@ -264,18 +324,19 @@ export function createMailService(database: DayDeskDatabase, config: ServerConfi
       return { account: { ...account, lastSyncedAt: now }, messages };
     },
     accounts: () => readRows().map(accountFromRow),
-    synchronize: async (accountId) => {
+    synchronize: async (accountId, folder = 'inbox') => {
       const connections = accountId ? [connection(accountId)] : readRows().map((row) => ({ account: accountFromRow(row), password: decryptSecret(key(), row.id, row.encryptedPassword) }));
       const messages: MailMessage[] = [];
       const now = new Date().toISOString();
       for (const item of connections) {
-        messages.push(...await transport.list(item));
+        messages.push(...await transport.list(item, folder));
         database.prepare('UPDATE mail_accounts SET last_synced_at = ?, updated_at = ? WHERE id = ?').run(now, now, item.account.id);
         item.account.lastSyncedAt = now;
       }
       return { accounts: connections.map((item) => item.account), messages: messages.sort((left, right) => right.receivedAt.localeCompare(left.receivedAt)), serverTime: now };
     },
-    content: (accountId, messageId) => transport.content(connection(accountId), messageId),
+    content: (accountId, messageId, folder = 'inbox') => transport.content(connection(accountId), messageId, folder),
+    attachment: (accountId, messageId, attachmentId, folder = 'inbox') => transport.attachment(connection(accountId), messageId, attachmentId, folder),
     send: async (accountId, input, attachments) => {
       const stored = connection(accountId);
       try {

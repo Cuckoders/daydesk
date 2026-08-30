@@ -6,7 +6,7 @@ import type { ServerConfig } from './config.js';
 import type { DayDeskDatabase } from './database.js';
 import { buildMimeMessage } from './mail-compose.js';
 import { decryptSecret, encryptSecret, MailConfigurationError, MailConnectionError, MailNotFoundError } from './mail-service.js';
-import type { MailAccount, MailContent, MailMessage, OutgoingMailAttachment, OutgoingMailInput } from './types.js';
+import type { IncomingMailAttachment, IncomingMailAttachmentData, MailAccount, MailContent, MailFolder, MailMessage, OutgoingMailAttachment, OutgoingMailInput } from './types.js';
 
 export type OAuthMailProvider = 'gmail' | 'outlook';
 type OAuthFlowStatus = 'pending' | 'processing' | 'completed' | 'failed';
@@ -17,8 +17,11 @@ const MESSAGE_LIMIT = 20;
 const ACCOUNT_LIMIT = 20;
 const MAX_JSON_BYTES = 3 * 1024 * 1024;
 const MAX_BODY_CHARACTERS = 200_000;
+const MAX_ATTACHMENT_BYTES = 2 * 1024 * 1024;
+const ATTACHMENT_LIMIT = 20;
 const tokenTextLimit = 32_768;
 const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const mimeTypePattern = /^[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]{0,126}\/[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]{0,126}$/;
 const safeText = (value: string, limit: number) => value.replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, limit);
 const safeBody = (value: string) => value.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '').trim().slice(0, MAX_BODY_CHARACTERS);
 const replyAddress = (value: string) => {
@@ -59,8 +62,9 @@ export interface OAuthProviderAdapter {
   exchangeCode(code: string, verifier: string, redirectUri: string): Promise<OAuthTokens>;
   refresh(refreshToken: string): Promise<OAuthTokens>;
   profile(accessToken: string): Promise<OAuthProfile>;
-  messages(accessToken: string, accountId: string): Promise<MailMessage[]>;
+  messages(accessToken: string, accountId: string, folder: MailFolder): Promise<MailMessage[]>;
   content(accessToken: string, messageId: string): Promise<MailContent>;
+  attachment(accessToken: string, messageId: string, attachmentId: string): Promise<IncomingMailAttachmentData>;
   send(accessToken: string, mime: Buffer): Promise<void>;
 }
 
@@ -83,6 +87,24 @@ function remoteMessageId(value: string) {
   const decoded = Buffer.from(value, 'base64url').toString('utf8');
   if (!decoded || decoded.length > 1024 || opaqueMessageId(decoded) !== value) throw new MailNotFoundError('Mail message not found');
   return decoded;
+}
+
+function safeAttachmentName(value: string | undefined, index: number) {
+  const clean = (value ?? '').replace(/[\u0000-\u001f\u007f/\\]/g, '_').trim().slice(0, 255);
+  return clean || `attachment-${index}`;
+}
+function safeMimeType(value: string | undefined) {
+  const clean = safeText(value ?? '', 255);
+  return mimeTypePattern.test(clean) ? clean : 'application/octet-stream';
+}
+
+function parsedAttachments(attachments: Awaited<ReturnType<typeof simpleParser>>['attachments']) {
+  return attachments.filter((item) => !item.related && item.contentDisposition !== 'inline').slice(0, ATTACHMENT_LIMIT);
+}
+
+function parsedAttachmentMetadata(attachments: Awaited<ReturnType<typeof simpleParser>>['attachments']): IncomingMailAttachment[] {
+  return parsedAttachments(attachments).map((item, index) => ({ id: String(index + 1), name: safeAttachmentName(item.filename, index + 1),
+    mimeType: safeMimeType(item.contentType), size: item.content.length, downloadable: item.content.length > 0 && item.content.length <= MAX_ATTACHMENT_BYTES }));
 }
 
 async function readLimited(response: Response, maxBytes: number) {
@@ -155,6 +177,35 @@ function createDefaultAdapter(config: ServerConfig, provider: OAuthMailProvider)
     return parseTokens(await providerJson(tokenEndpoint, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body }), previousRefreshToken);
   };
 
+  const gmailParsedMessage = async (accessToken: string, messageId: string) => {
+    const remoteId = remoteMessageId(messageId);
+    const value = await providerJson(`https://gmail.googleapis.com/gmail/v1/users/me/messages/${encodeURIComponent(remoteId)}?format=raw`, { headers: bearer(accessToken) }, MAX_JSON_BYTES);
+    if (!record(value) || typeof value.raw !== 'string' || value.raw.length > MAX_JSON_BYTES) throw new MailConnectionError('Gmail returned invalid message');
+    const source = Buffer.from(value.raw, 'base64url');
+    if (source.length > MAX_ATTACHMENT_BYTES) throw new MailConnectionError('Mail message is too large');
+    return simpleParser(source, { skipImageLinks: true, skipTextToHtml: true, maxHtmlLengthToParse: MAX_ATTACHMENT_BYTES });
+  };
+
+  interface OutlookAttachment extends IncomingMailAttachment { remoteId: string; raw: boolean }
+  const outlookAttachments = async (accessToken: string, messageId: string): Promise<OutlookAttachment[]> => {
+    const remoteId = remoteMessageId(messageId);
+    const url = new URL(`https://graph.microsoft.com/v1.0/me/messages/${encodeURIComponent(remoteId)}/attachments`);
+    url.searchParams.set('$top', String(ATTACHMENT_LIMIT));
+    url.searchParams.set('$select', 'id,name,size,contentType,isInline');
+    const value = await providerJson(url, { headers: bearer(accessToken) }, MAX_JSON_BYTES);
+    if (!record(value) || !Array.isArray(value.value)) throw new MailConnectionError('Outlook returned invalid attachments');
+    let visibleIndex = 0;
+    return value.value.flatMap((item): OutlookAttachment[] => {
+      if (!record(item) || typeof item.id !== 'string' || !item.id || item.id.length > 2048 || item.isInline === true
+        || typeof item.size !== 'number' || !Number.isInteger(item.size) || item.size < 0 || item.size > 100 * 1024 * 1024) return [];
+      visibleIndex += 1;
+      const type = typeof item['@odata.type'] === 'string' ? item['@odata.type'] : '#microsoft.graph.fileAttachment';
+      return [{ id: String(visibleIndex), remoteId: item.id, name: safeAttachmentName(typeof item.name === 'string' ? item.name : undefined, visibleIndex),
+        mimeType: safeMimeType(typeof item.contentType === 'string' ? item.contentType : undefined), size: item.size,
+        downloadable: item.size > 0 && item.size <= MAX_ATTACHMENT_BYTES && type !== '#microsoft.graph.referenceAttachment', raw: type !== '#microsoft.graph.referenceAttachment' }];
+    }).slice(0, ATTACHMENT_LIMIT);
+  };
+
   return {
     authorizationUrl: ({ state, challenge: codeChallenge, redirectUri: requestedRedirect }) => {
       if (requestedRedirect !== redirectUri) throw new MailConfigurationError('OAuth redirect is invalid');
@@ -175,16 +226,17 @@ function createDefaultAdapter(config: ServerConfig, provider: OAuthMailProvider)
       if (typeof address !== 'string' || !emailPattern.test(address) || address.length > 320 || typeof label !== 'string') throw new MailConnectionError('Mail provider returned invalid profile');
       return { address: address.toLowerCase(), label: safeText(label, 80) || (isGoogle ? 'Gmail' : 'Outlook') };
     },
-    messages: async (accessToken, accountId) => {
+    messages: async (accessToken, accountId, folder) => {
       if (isGoogle) {
-        const list = await providerJson(`https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=${MESSAGE_LIMIT}&labelIds=INBOX`, { headers: bearer(accessToken) });
+        const label = folder === 'sent' ? 'SENT' : 'INBOX';
+        const list = await providerJson(`https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=${MESSAGE_LIMIT}&labelIds=${label}`, { headers: bearer(accessToken) });
         if (!record(list) || (list.messages !== undefined && !Array.isArray(list.messages))) throw new MailConnectionError('Gmail returned invalid messages');
         const identifiers = (Array.isArray(list.messages) ? list.messages : []).flatMap((item) => record(item) && typeof item.id === 'string' && item.id.length <= 1024 ? [item.id] : []).slice(0, MESSAGE_LIMIT);
         const messages: MailMessage[] = [];
         for (const id of identifiers) {
           const url = new URL(`https://gmail.googleapis.com/gmail/v1/users/me/messages/${encodeURIComponent(id)}`);
           url.searchParams.set('format', 'metadata');
-          for (const header of ['From', 'Subject', 'Date']) url.searchParams.append('metadataHeaders', header);
+          for (const header of ['From', 'To', 'Subject', 'Date']) url.searchParams.append('metadataHeaders', header);
           const item = await providerJson(url, { headers: bearer(accessToken) });
           if (!record(item) || typeof item.id !== 'string' || typeof item.internalDate !== 'string' || !record(item.payload) || !Array.isArray(item.payload.headers)) continue;
           const headers = new Map(item.payload.headers.flatMap((entry) => record(entry) && typeof entry.name === 'string' && typeof entry.value === 'string' ? [[entry.name.toLowerCase(), entry.value] as const] : []));
@@ -192,43 +244,62 @@ function createDefaultAdapter(config: ServerConfig, provider: OAuthMailProvider)
           const receivedAt = new Date(Number(item.internalDate));
           if (!Number.isFinite(receivedAt.getTime())) continue;
           const replyTo = replyAddress(headers.get('from') ?? '');
-          messages.push({ id: opaqueMessageId(item.id), accountId, sender: safeText(headers.get('from') ?? 'Без отправителя', 500), subject: safeText(headers.get('subject') ?? 'Без темы', 1_000),
-            preview: typeof item.snippet === 'string' ? safeText(item.snippet, 300) : '', receivedAt: receivedAt.toISOString(), unread: labelIds.includes('UNREAD'), starred: labelIds.includes('STARRED'),
-            ...(replyTo ? { replyTo } : {}) });
+          const sender = folder === 'sent' ? `Кому: ${safeText(headers.get('to') ?? 'Без получателя', 494)}` : safeText(headers.get('from') ?? 'Без отправителя', 500);
+          messages.push({ id: opaqueMessageId(item.id), accountId, sender, subject: safeText(headers.get('subject') ?? 'Без темы', 1_000),
+            preview: typeof item.snippet === 'string' ? safeText(item.snippet, 300) : '', receivedAt: receivedAt.toISOString(), unread: folder === 'inbox' && labelIds.includes('UNREAD'), starred: labelIds.includes('STARRED'), folder,
+            ...(folder === 'inbox' && replyTo ? { replyTo } : {}) });
         }
         return messages.sort((a, b) => b.receivedAt.localeCompare(a.receivedAt));
       }
-      const url = new URL('https://graph.microsoft.com/v1.0/me/mailFolders/inbox/messages');
+      const url = new URL(`https://graph.microsoft.com/v1.0/me/mailFolders/${folder === 'sent' ? 'sentitems' : 'inbox'}/messages`);
       url.searchParams.set('$top', String(MESSAGE_LIMIT)); url.searchParams.set('$orderby', 'receivedDateTime desc');
-      url.searchParams.set('$select', 'id,subject,bodyPreview,receivedDateTime,isRead,flag,from');
+      url.searchParams.set('$select', 'id,subject,bodyPreview,receivedDateTime,sentDateTime,isRead,flag,from,toRecipients');
       const list = await providerJson(url, { headers: bearer(accessToken) }, MAX_JSON_BYTES);
       if (!record(list) || !Array.isArray(list.value)) throw new MailConnectionError('Outlook returned invalid messages');
       return list.value.flatMap((item): MailMessage[] => {
-        if (!record(item) || typeof item.id !== 'string' || item.id.length > 1024 || typeof item.receivedDateTime !== 'string' || typeof item.isRead !== 'boolean') return [];
+        if (!record(item) || typeof item.id !== 'string' || item.id.length > 1024 || typeof item.isRead !== 'boolean') return [];
         const from = record(item.from) && record(item.from.emailAddress) ? item.from.emailAddress : undefined;
-        const sender = from && (typeof from.name === 'string' ? from.name : typeof from.address === 'string' ? from.address : undefined);
+        const recipient = Array.isArray(item.toRecipients) && record(item.toRecipients[0]) && record(item.toRecipients[0].emailAddress) ? item.toRecipients[0].emailAddress : undefined;
+        const sender = folder === 'sent' ? `Кому: ${safeText(recipient && (typeof recipient.name === 'string' ? recipient.name : typeof recipient.address === 'string' ? recipient.address : '') || 'Без получателя', 494)}`
+          : from && (typeof from.name === 'string' ? from.name : typeof from.address === 'string' ? from.address : undefined);
         const replyTo = from && typeof from.address === 'string' && emailPattern.test(from.address) ? from.address.toLowerCase() : undefined;
-        const receivedAt = new Date(item.receivedDateTime); if (!Number.isFinite(receivedAt.getTime())) return [];
+        const dateValue = folder === 'sent' ? item.sentDateTime : item.receivedDateTime;
+        if (typeof dateValue !== 'string') return [];
+        const receivedAt = new Date(dateValue); if (!Number.isFinite(receivedAt.getTime())) return [];
         return [{ id: opaqueMessageId(item.id), accountId, sender: safeText(sender ?? 'Без отправителя', 500), subject: safeText(typeof item.subject === 'string' ? item.subject : 'Без темы', 1_000),
-          preview: safeText(typeof item.bodyPreview === 'string' ? item.bodyPreview : '', 300), receivedAt: receivedAt.toISOString(), unread: !item.isRead,
-          starred: record(item.flag) && item.flag.flagStatus === 'flagged', ...(replyTo ? { replyTo } : {}) }];
+          preview: safeText(typeof item.bodyPreview === 'string' ? item.bodyPreview : '', 300), receivedAt: receivedAt.toISOString(), unread: folder === 'inbox' && !item.isRead,
+          starred: record(item.flag) && item.flag.flagStatus === 'flagged', folder, ...(folder === 'inbox' && replyTo ? { replyTo } : {}) }];
       }).sort((a, b) => b.receivedAt.localeCompare(a.receivedAt));
     },
     content: async (accessToken, messageId) => {
       const remoteId = remoteMessageId(messageId);
       if (isGoogle) {
-        const value = await providerJson(`https://gmail.googleapis.com/gmail/v1/users/me/messages/${encodeURIComponent(remoteId)}?format=raw`, { headers: bearer(accessToken) }, MAX_JSON_BYTES);
-        if (!record(value) || typeof value.raw !== 'string' || value.raw.length > MAX_JSON_BYTES) throw new MailConnectionError('Gmail returned invalid message');
-        const source = Buffer.from(value.raw, 'base64url');
-        if (source.length > 2 * 1024 * 1024) throw new MailConnectionError('Mail message is too large');
-        const parsed = await simpleParser(source, { skipImageLinks: true, skipTextToHtml: true, maxHtmlLengthToParse: 2 * 1024 * 1024 });
-        return { body: safeBody(parsed.text ?? '') || 'В письме нет текстового содержимого.', hasAttachments: parsed.attachments.length > 0 };
+        const parsed = await gmailParsedMessage(accessToken, messageId);
+        const attachments = parsedAttachmentMetadata(parsed.attachments);
+        return { body: safeBody(parsed.text ?? '') || 'В письме нет текстового содержимого.', hasAttachments: attachments.length > 0, attachments };
       }
       const url = new URL(`https://graph.microsoft.com/v1.0/me/messages/${encodeURIComponent(remoteId)}`);
       url.searchParams.set('$select', 'body,hasAttachments');
       const value = await providerJson(url, { headers: bearer(accessToken, { Prefer: 'outlook.body-content-type="text"' }) }, MAX_JSON_BYTES);
       if (!record(value) || !record(value.body) || typeof value.body.content !== 'string' || typeof value.hasAttachments !== 'boolean') throw new MailConnectionError('Outlook returned invalid message');
-      return { body: safeBody(value.body.content) || 'В письме нет текстового содержимого.', hasAttachments: value.hasAttachments };
+      const attachments = value.hasAttachments ? (await outlookAttachments(accessToken, messageId)).map(({ remoteId: _remoteId, raw: _raw, ...item }) => item) : [];
+      return { body: safeBody(value.body.content) || 'В письме нет текстового содержимого.', hasAttachments: attachments.length > 0, attachments };
+    },
+    attachment: async (accessToken, messageId, attachmentId) => {
+      const index = Number(attachmentId) - 1;
+      if (!Number.isInteger(index) || index < 0 || index >= ATTACHMENT_LIMIT) throw new MailNotFoundError('Mail attachment not found');
+      if (isGoogle) {
+        const parsed = await gmailParsedMessage(accessToken, messageId); const selected = parsedAttachments(parsed.attachments)[index];
+        if (!selected || selected.content.length > MAX_ATTACHMENT_BYTES) throw new MailNotFoundError('Mail attachment not found');
+        return { id: attachmentId, name: safeAttachmentName(selected.filename, index + 1), mimeType: safeMimeType(selected.contentType),
+          size: selected.content.length, downloadable: true, content: Buffer.from(selected.content) };
+      }
+      const attachments = await outlookAttachments(accessToken, messageId); const selected = attachments[index];
+      if (!selected || !selected.downloadable || !selected.raw) throw new MailNotFoundError('Mail attachment not found');
+      const remoteId = remoteMessageId(messageId);
+      const content = Buffer.from(await providerRequest(`https://graph.microsoft.com/v1.0/me/messages/${encodeURIComponent(remoteId)}/attachments/${encodeURIComponent(selected.remoteId)}/$value`, { headers: bearer(accessToken) }, MAX_ATTACHMENT_BYTES));
+      if (content.length > MAX_ATTACHMENT_BYTES) throw new MailConnectionError('Mail attachment is too large');
+      return { id: attachmentId, name: selected.name, mimeType: selected.mimeType, size: content.length, downloadable: true, content };
     },
     send: async (accessToken, mime) => {
       if (isGoogle) {
@@ -251,8 +322,9 @@ export interface MailOAuthService {
   complete(provider: OAuthMailProvider, input: { code?: string; state?: string; error?: string }): Promise<boolean>;
   status(flowId: string, deviceId: string): { status: 'pending' | 'completed' | 'failed'; account?: MailAccount };
   accounts(): MailAccount[];
-  synchronize(accountId?: string): Promise<{ accounts: MailAccount[]; messages: MailMessage[]; serverTime: string }>;
+  synchronize(accountId?: string, folder?: MailFolder): Promise<{ accounts: MailAccount[]; messages: MailMessage[]; serverTime: string }>;
   content(accountId: string, messageId: string): Promise<MailContent>;
+  attachment(accountId: string, messageId: string, attachmentId: string): Promise<IncomingMailAttachmentData>;
   send(accountId: string, input: OutgoingMailInput, attachments: OutgoingMailAttachment[]): Promise<void>;
   remove(accountId: string): void;
 }
@@ -342,15 +414,16 @@ export function createMailOAuthService(database: DayDeskDatabase, config: Server
       return { status: flow.status === 'failed' ? 'failed' : 'pending' };
     },
     accounts: () => rows().map(accountFromRow),
-    synchronize: async (accountId) => {
+    synchronize: async (accountId, folder = 'inbox') => {
       const selected = accountId ? [row(accountId)] : rows(); const messages: MailMessage[] = []; const now = new Date().toISOString();
       for (const account of selected) {
-        messages.push(...await adapter(account.provider).messages(await accessToken(account), account.id));
+        messages.push(...await adapter(account.provider).messages(await accessToken(account), account.id, folder));
         database.prepare('UPDATE oauth_mail_accounts SET last_synced_at = ?, updated_at = ? WHERE id = ?').run(now, now, account.id); account.lastSyncedAt = now;
       }
       return { accounts: selected.map(accountFromRow), messages: messages.sort((a, b) => b.receivedAt.localeCompare(a.receivedAt)), serverTime: now };
     },
     content: async (accountId, messageId) => { const account = row(accountId); return adapter(account.provider).content(await accessToken(account), messageId); },
+    attachment: async (accountId, messageId, attachmentId) => { const account = row(accountId); return adapter(account.provider).attachment(await accessToken(account), messageId, attachmentId); },
     send: async (accountId, input, attachments) => { const account = row(accountId); const mime = await buildMimeMessage(account.address, input, attachments, true); await adapter(account.provider).send(await accessToken(account), mime); },
     remove: (accountId) => { const result = database.prepare('DELETE FROM oauth_mail_accounts WHERE id = ?').run(accountId); if (!result.changes) throw new MailNotFoundError('Mail account not found'); },
   };

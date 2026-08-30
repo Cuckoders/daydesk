@@ -164,7 +164,7 @@ export const mailSyncSchema = {
   headers: authenticatedHeaders,
   body: {
     type: 'object', additionalProperties: false,
-    properties: { accountId: mailAccountId },
+    properties: { accountId: mailAccountId, folder: { type: 'string', enum: ['inbox', 'sent'] } },
   },
 } as const;
 
@@ -179,6 +179,20 @@ export const mailMessageParamsSchema = {
     type: 'object', additionalProperties: false, required: ['accountId', 'messageId'],
     properties: { accountId: mailAccountId, messageId: { type: 'string', minLength: 1, maxLength: 2048, pattern: '^[A-Za-z0-9_-]+$' } },
   },
+  querystring: { type: 'object', additionalProperties: false, properties: { folder: { type: 'string', enum: ['inbox', 'sent'] } } },
+} as const;
+
+export const mailAttachmentParamsSchema = {
+  headers: authenticatedHeaders,
+  params: {
+    type: 'object', additionalProperties: false, required: ['accountId', 'messageId', 'attachmentId'],
+    properties: {
+      accountId: mailAccountId,
+      messageId: { type: 'string', minLength: 1, maxLength: 2048, pattern: '^[A-Za-z0-9_-]+$' },
+      attachmentId: { type: 'string', minLength: 1, maxLength: 3, pattern: '^[1-9][0-9]{0,2}$' },
+    },
+  },
+  querystring: { type: 'object', additionalProperties: false, properties: { folder: { type: 'string', enum: ['inbox', 'sent'] } } },
 } as const;
 
 const oauthProvider = { type: 'string', enum: ['gmail', 'outlook'] } as const;

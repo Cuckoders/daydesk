@@ -24,7 +24,7 @@ afterEach(async () => {
 
 const message = (accountId: string): MailMessage => ({
   id: '42', accountId, sender: 'Команда DayDesk', subject: 'Проверка почты', preview: 'Всё работает',
-  receivedAt: '2026-08-30T12:00:00.000Z', unread: true, starred: false,
+  receivedAt: '2026-08-30T12:00:00.000Z', unread: true, starred: false, folder: 'inbox',
 });
 
 test('private and reserved IMAP destinations are blocked by default', () => {
@@ -41,7 +41,8 @@ test('IMAP password is encrypted at rest and never returned with account data', 
   let receivedPassword = '';
   const transport: MailTransport = {
     list: async ({ account, password }) => { receivedPassword = password; return [message(account.id)]; },
-    content: async () => ({ body: 'Текст письма', hasAttachments: false }),
+    content: async () => ({ body: 'Текст письма', hasAttachments: false, attachments: [] }),
+    attachment: async () => { throw new Error('Not used'); },
   };
   const service = createMailService(database, config, transport);
   const result = await service.connectImap({ label: 'Работа', address: 'user@example.com', host: 'imap.example.com', port: 993, username: 'user@example.com', password: 'app-secret-123' });
@@ -55,11 +56,13 @@ test('IMAP password is encrypted at rest and never returned with account data', 
 
 test('mail API requires device authentication and validates connection input', async () => {
   const account: MailAccount = { id: '123e4567-e89b-12d3-a456-426614174000', provider: 'imap', label: 'Работа', address: 'user@example.com', host: 'imap.example.com', port: 993, username: 'user@example.com' };
+  let synchronizedFolder = 'inbox';
   const fake: MailService = {
     connectImap: async () => ({ account, messages: [message(account.id)] }),
     accounts: () => [account],
-    synchronize: async () => ({ accounts: [account], messages: [message(account.id)], serverTime: '2026-08-30T12:00:00.000Z' }),
-    content: async () => ({ body: 'Текст письма', hasAttachments: false }),
+    synchronize: async (_accountId, folder = 'inbox') => { synchronizedFolder = folder; return { accounts: [account], messages: [{ ...message(account.id), folder }], serverTime: '2026-08-30T12:00:00.000Z' }; },
+    content: async () => ({ body: 'Текст письма', hasAttachments: false, attachments: [] }),
+    attachment: async () => ({ id: '1', name: 'note.txt', mimeType: 'text/plain', size: 5, downloadable: true, content: Buffer.from('hello') }),
     send: async () => undefined,
     remove: () => undefined,
   };
@@ -77,7 +80,17 @@ test('mail API requires device authentication and validates connection input', a
   assert.equal(connected.json().data.messages[0].subject, 'Проверка почты');
   const content = await app.inject({ method: 'GET', url: `/v1/mail/messages/${account.id}/42`, headers });
   assert.equal(content.statusCode, 200);
+  assert.equal(content.headers['cache-control'], 'no-store');
   assert.equal(content.json().data.body, 'Текст письма');
+  const sent = await app.inject({ method: 'POST', url: '/v1/mail/sync', headers, payload: { folder: 'sent' } });
+  assert.equal(sent.statusCode, 200);
+  assert.equal(synchronizedFolder, 'sent');
+  assert.equal(sent.json().data.messages[0].folder, 'sent');
+  const attachment = await app.inject({ method: 'GET', url: `/v1/mail/messages/${account.id}/42/attachments/1`, headers });
+  assert.equal(attachment.statusCode, 200);
+  assert.equal(attachment.headers['cache-control'], 'no-store');
+  assert.deepEqual(attachment.json().data, { id: '1', name: 'note.txt', mimeType: 'text/plain', size: 5, data: Buffer.from('hello').toString('base64') });
+  assert.equal((await app.inject({ method: 'GET', url: `/v1/mail/messages/${account.id}/42/attachments/0`, headers })).statusCode, 400);
 });
 
 test('OAuth mail flow binds state to a device and encrypts offline credentials', async () => {
@@ -103,7 +116,8 @@ test('OAuth mail flow binds state to a device and encrypts offline credentials',
     },
     profile: async () => ({ address: 'user@gmail.com', label: 'Gmail' }),
     messages: async (_accessToken, accountId) => [message(accountId)],
-    content: async () => ({ body: 'Строка 1\nСтрока 2', hasAttachments: true }),
+    content: async () => ({ body: 'Строка 1\nСтрока 2', hasAttachments: true, attachments: [{ id: '1', name: 'plan.txt', mimeType: 'text/plain', size: 4, downloadable: true }] }),
+    attachment: async () => ({ id: '1', name: 'plan.txt', mimeType: 'text/plain', size: 4, downloadable: true, content: Buffer.from('plan') }),
     send: async (_accessToken, mime) => { sentMime = mime.toString('utf8'); },
   };
   const service = createMailOAuthService(database, oauthConfig, { gmail: adapter });
@@ -134,7 +148,7 @@ test('OAuth mail flow binds state to a device and encrypts offline credentials',
   const snapshot = await service.synchronize(status.account?.id);
   assert.equal(refreshedWith, 'refresh-secret');
   assert.equal(snapshot.messages[0]?.subject, 'Проверка почты');
-  assert.deepEqual(await service.content(status.account?.id ?? '', '42'), { body: 'Строка 1\nСтрока 2', hasAttachments: true });
+  assert.deepEqual(await service.content(status.account?.id ?? '', '42'), { body: 'Строка 1\nСтрока 2', hasAttachments: true, attachments: [{ id: '1', name: 'plan.txt', mimeType: 'text/plain', size: 4, downloadable: true }] });
   await service.send(status.account?.id ?? '', { to: ['friend@example.com'], cc: [], bcc: ['hidden@example.com'], subject: 'План', body: 'Текст' }, [
     { name: 'plan.txt', mimeType: 'text/plain', size: 4, content: Buffer.from('file') },
   ]);
@@ -156,14 +170,15 @@ test('OAuth mail API exposes provider flow and accepts provider callback metadat
     status: () => ({ status: 'completed', account }),
     accounts: () => [account],
     synchronize: async () => ({ accounts: [account], messages: [message(account.id)], serverTime: '2026-08-30T12:00:00.000Z' }),
-    content: async () => ({ body: 'Текст', hasAttachments: false }),
+    content: async () => ({ body: 'Текст', hasAttachments: false, attachments: [] }),
+    attachment: async () => ({ id: '1', name: 'note.txt', mimeType: 'text/plain', size: 5, downloadable: true, content: Buffer.from('hello') }),
     send: async (_accountId, input, attachments) => { outgoing = { subject: input.subject, ...(attachments[0] ? { attachmentName: attachments[0].name } : {}) }; },
     remove: () => undefined,
   };
   const imap: MailService = {
     connectImap: async () => { throw new Error('Not used'); }, accounts: () => [],
     synchronize: async () => ({ accounts: [], messages: [], serverTime: '2026-08-30T12:00:00.000Z' }),
-    content: async () => { throw new Error('Not used'); }, remove: () => undefined,
+    content: async () => { throw new Error('Not used'); }, attachment: async () => { throw new Error('Not used'); }, remove: () => undefined,
     send: async () => { throw new Error('Not used'); },
   };
   const app = await buildApp(config, { mailService: imap, mailOAuthService: oauth });

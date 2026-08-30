@@ -9,9 +9,9 @@ import { createDatabase } from './database.js';
 import { createMailAttachmentRegistry, MailAttachmentNotFoundError, type AttachmentUploadInput, type MailAttachmentRegistry } from './mail-compose.js';
 import { createMailOAuthService, type MailOAuthService, type OAuthMailProvider } from './mail-oauth.js';
 import { createMailService, MailConfigurationError, MailConnectionError, MailNotFoundError, type ConnectImapInput, type MailService } from './mail-service.js';
-import { connectImapSchema, discardMailAttachmentsSchema, mailAccountListSchema, mailAccountParamsSchema, mailMessageParamsSchema, mailOAuthCallbackSchema, mailOAuthStatusSchema, mailSyncSchema, registerDeviceSchema, sendMailSchema, startMailOAuthSchema, syncSchema, uploadMailAttachmentSchema } from './schemas.js';
+import { connectImapSchema, discardMailAttachmentsSchema, mailAccountListSchema, mailAccountParamsSchema, mailAttachmentParamsSchema, mailMessageParamsSchema, mailOAuthCallbackSchema, mailOAuthStatusSchema, mailSyncSchema, registerDeviceSchema, sendMailSchema, startMailOAuthSchema, syncSchema, uploadMailAttachmentSchema } from './schemas.js';
 import { synchronize } from './sync-service.js';
-import type { OutgoingMailInput, SyncRequestBody } from './types.js';
+import type { MailFolder, OutgoingMailInput, SyncRequestBody } from './types.js';
 
 interface RegisterBody {
   setupCode: string;
@@ -90,29 +90,45 @@ export async function buildApp(config: ServerConfig, dependencies: { mailService
     return reply.code(201).send({ status: 'success', data: result });
   });
 
-  app.post<{ Body: { accountId?: string } }>('/v1/mail/sync', {
+  app.post<{ Body: { accountId?: string; folder?: MailFolder } }>('/v1/mail/sync', {
     schema: mailSyncSchema,
     config: { rateLimit: { max: 10, timeWindow: '1 minute' } },
   }, async (request) => {
     authenticateDevice(database, request);
     const accountId = request.body.accountId;
+    const folder = request.body.folder ?? 'inbox';
     if (accountId) {
-      if (mailService.accounts().some((account) => account.id === accountId)) return { status: 'success', data: await mailService.synchronize(accountId) };
-      return { status: 'success', data: await mailOAuthService.synchronize(accountId) };
+      if (mailService.accounts().some((account) => account.id === accountId)) return { status: 'success', data: await mailService.synchronize(accountId, folder) };
+      return { status: 'success', data: await mailOAuthService.synchronize(accountId, folder) };
     }
-    const [imap, oauth] = await Promise.all([mailService.synchronize(), mailOAuthService.synchronize()]);
+    const [imap, oauth] = await Promise.all([mailService.synchronize(undefined, folder), mailOAuthService.synchronize(undefined, folder)]);
     return { status: 'success', data: { accounts: [...imap.accounts, ...oauth.accounts], messages: [...imap.messages, ...oauth.messages].sort((a, b) => b.receivedAt.localeCompare(a.receivedAt)), serverTime: new Date().toISOString() } };
   });
 
-  app.get<{ Params: { accountId: string; messageId: string } }>('/v1/mail/messages/:accountId/:messageId', {
+  app.get<{ Params: { accountId: string; messageId: string }; Querystring: { folder?: MailFolder } }>('/v1/mail/messages/:accountId/:messageId', {
     schema: mailMessageParamsSchema,
     config: { rateLimit: { max: 30, timeWindow: '1 minute' } },
-  }, async (request) => {
+  }, async (request, reply) => {
     authenticateDevice(database, request);
+    const folder = request.query.folder ?? 'inbox';
     const content = mailService.accounts().some((account) => account.id === request.params.accountId)
-      ? await mailService.content(request.params.accountId, request.params.messageId)
+      ? await mailService.content(request.params.accountId, request.params.messageId, folder)
       : await mailOAuthService.content(request.params.accountId, request.params.messageId);
-    return { status: 'success', data: content };
+    return reply.header('cache-control', 'no-store').send({ status: 'success', data: content });
+  });
+
+  app.get<{ Params: { accountId: string; messageId: string; attachmentId: string }; Querystring: { folder?: MailFolder } }>('/v1/mail/messages/:accountId/:messageId/attachments/:attachmentId', {
+    schema: mailAttachmentParamsSchema,
+    config: { rateLimit: { max: 10, timeWindow: '1 minute' } },
+  }, async (request, reply) => {
+    authenticateDevice(database, request);
+    const folder = request.query.folder ?? 'inbox';
+    const attachment = mailService.accounts().some((account) => account.id === request.params.accountId)
+      ? await mailService.attachment(request.params.accountId, request.params.messageId, request.params.attachmentId, folder)
+      : await mailOAuthService.attachment(request.params.accountId, request.params.messageId, request.params.attachmentId);
+    try {
+      return reply.header('cache-control', 'no-store').send({ status: 'success', data: { id: attachment.id, name: attachment.name, mimeType: attachment.mimeType, size: attachment.size, data: attachment.content.toString('base64') } });
+    } finally { attachment.content.fill(0); }
   });
 
   app.post<{ Body: AttachmentUploadInput }>('/v1/mail/attachments', {

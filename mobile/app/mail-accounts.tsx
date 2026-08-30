@@ -35,7 +35,8 @@ export default function MailAccountsScreen() {
     setWorking(true);
     try {
       const snapshot = await synchronizeMail();
-      setMailSnapshot(snapshot.accounts, snapshot.messages);
+      const current = useDayDeskStore.getState();
+      setMailSnapshot(snapshot.accounts, [...current.messages.filter((item) => item.folder === 'sent'), ...snapshot.messages].sort((a, b) => b.receivedAt.localeCompare(a.receivedAt)));
     } catch (error) {
       Alert.alert('Не удалось обновить почту', error instanceof Error ? error.message : 'Попробуйте ещё раз.');
     } finally { setWorking(false); }

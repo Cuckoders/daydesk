@@ -111,12 +111,28 @@ export interface MailMessage {
   receivedAt: string;
   unread: boolean;
   starred: boolean;
+  folder: MailFolder;
   replyTo?: string;
+}
+
+export type MailFolder = 'inbox' | 'sent';
+
+export interface IncomingMailAttachment {
+  id: string;
+  name: string;
+  mimeType: string;
+  size: number;
+  downloadable: boolean;
 }
 
 export interface MailContent {
   body: string;
   hasAttachments: boolean;
+  attachments: IncomingMailAttachment[];
+}
+
+export interface IncomingMailAttachmentData extends IncomingMailAttachment {
+  content: Buffer;
 }
 
 export interface OutgoingMailAttachment {
