@@ -3,8 +3,8 @@ import { create } from 'zustand';
 import { createJSONStorage, persist } from 'zustand/middleware';
 
 import { initialState } from '@/src/data';
-import { cancelReminder, scheduleRoutineReminder, scheduleTaskReminder } from '@/src/services/notifications';
-import type { DayDeskState, NewTaskInput, RemoteSyncChange, Routine, SyncStatus, Task } from '@/src/types';
+import { cancelReminder, cancelReminders, scheduleEventReminder, scheduleRoutineReminders, scheduleTaskReminder } from '@/src/services/notifications';
+import type { CalendarEvent, DayDeskState, NewEventInput, NewTaskInput, RemoteSyncChange, Routine, SyncOperation, SyncStatus, Task } from '@/src/types';
 import { nextDueDate, nextDueDateForDays } from '@/src/utils/date';
 
 interface DayDeskActions {
@@ -12,10 +12,13 @@ interface DayDeskActions {
   updateTask: (id: string, input: NewTaskInput) => Promise<void>;
   toggleTask: (id: string) => Promise<void>;
   deleteTask: (id: string) => Promise<void>;
+  addEvent: (input: NewEventInput) => Promise<CalendarEvent>;
+  updateEvent: (id: string, input: NewEventInput) => Promise<void>;
+  deleteEvent: (id: string) => Promise<void>;
   toggleRoutine: (id: string) => Promise<void>;
   enableAllRoutines: () => Promise<void>;
   setSyncStatus: (status: SyncStatus, error?: string) => void;
-  queueTasksForSync: (taskIds: string[]) => void;
+  queueEntitiesForSync: (entities: { entity: SyncOperation['entity']; entityId: string }[]) => void;
   applySyncResult: (changes: RemoteSyncChange[], acceptedOperationIds: string[], cursor: number, serverTime: string) => Promise<void>;
   markHydrated: () => void;
 }
@@ -25,9 +28,9 @@ type DayDeskStore = DayDeskState & DayDeskActions;
 const id = (prefix: string) => `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 const recurringTaskId = (seriesId: string, dueAt: string) => `repeat-${seriesId.slice(0, 100)}-${new Date(dueAt).getTime().toString(36)}`;
 
-const queueOperation = (entityId: string, operation: 'upsert' | 'delete') => ({
+const queueOperation = (entity: SyncOperation['entity'], entityId: string, operation: 'upsert' | 'delete') => ({
   id: id('sync'),
-  entity: 'task' as const,
+  entity,
   entityId,
   operation,
   createdAt: new Date().toISOString(),
@@ -55,7 +58,7 @@ export const useDayDeskStore = create<DayDeskStore>()(
         if (task.reminderEnabled) task.notificationId = await scheduleTaskReminder(task);
         set((state) => ({
           tasks: [task, ...state.tasks],
-          syncQueue: enqueueLatest(state.syncQueue, queueOperation(task.id, 'upsert')),
+          syncQueue: enqueueLatest(state.syncQueue, queueOperation('task', task.id, 'upsert')),
         }));
         return task;
       },
@@ -78,7 +81,7 @@ export const useDayDeskStore = create<DayDeskStore>()(
         if (!updated.completed && updated.reminderEnabled) updated.notificationId = await scheduleTaskReminder(updated);
         set((state) => ({
           tasks: state.tasks.map((task) => (task.id === taskId ? updated : task)),
-          syncQueue: enqueueLatest(state.syncQueue, queueOperation(taskId, 'upsert')),
+          syncQueue: enqueueLatest(state.syncQueue, queueOperation('task', taskId, 'upsert')),
         }));
       },
       toggleTask: async (taskId) => {
@@ -120,8 +123,8 @@ export const useDayDeskStore = create<DayDeskStore>()(
         set((state) => ({
           tasks: [...additions, ...state.tasks.map((task) => (task.id === taskId ? updated : task))],
           syncQueue: additions.reduce(
-            (queue, task) => enqueueLatest(queue, queueOperation(task.id, 'upsert')),
-            enqueueLatest(state.syncQueue, queueOperation(taskId, 'upsert')),
+            (queue, task) => enqueueLatest(queue, queueOperation('task', task.id, 'upsert')),
+            enqueueLatest(state.syncQueue, queueOperation('task', taskId, 'upsert')),
           ),
         }));
       },
@@ -130,61 +133,148 @@ export const useDayDeskStore = create<DayDeskStore>()(
         await cancelReminder(current?.notificationId);
         set((state) => ({
           tasks: state.tasks.filter((task) => task.id !== taskId),
-          syncQueue: enqueueLatest(state.syncQueue, queueOperation(taskId, 'delete')),
+          syncQueue: enqueueLatest(state.syncQueue, queueOperation('task', taskId, 'delete')),
+        }));
+      },
+      addEvent: async (input) => {
+        const event: CalendarEvent = {
+          ...input,
+          id: id('event'),
+          updatedAt: new Date().toISOString(),
+          syncVersion: 1,
+        };
+        if (event.reminderEnabled) event.notificationId = await scheduleEventReminder(event);
+        set((state) => ({
+          events: [...state.events, event].sort((left, right) => left.startsAt.localeCompare(right.startsAt)),
+          syncQueue: enqueueLatest(state.syncQueue, queueOperation('event', event.id, 'upsert')),
+        }));
+        return event;
+      },
+      updateEvent: async (eventId, input) => {
+        const current = get().events.find((event) => event.id === eventId);
+        if (!current) return;
+        await cancelReminder(current.notificationId);
+        const updated: CalendarEvent = {
+          ...current,
+          ...input,
+          notificationId: undefined,
+          updatedAt: new Date().toISOString(),
+          syncVersion: (current.syncVersion ?? 0) + 1,
+        };
+        if (updated.reminderEnabled) updated.notificationId = await scheduleEventReminder(updated);
+        set((state) => ({
+          events: state.events.map((event) => event.id === eventId ? updated : event).sort((left, right) => left.startsAt.localeCompare(right.startsAt)),
+          syncQueue: enqueueLatest(state.syncQueue, queueOperation('event', eventId, 'upsert')),
+        }));
+      },
+      deleteEvent: async (eventId) => {
+        const current = get().events.find((event) => event.id === eventId);
+        await cancelReminder(current?.notificationId);
+        set((state) => ({
+          events: state.events.filter((event) => event.id !== eventId),
+          syncQueue: enqueueLatest(state.syncQueue, queueOperation('event', eventId, 'delete')),
         }));
       },
       toggleRoutine: async (routineId) => {
         const current = get().routines.find((routine) => routine.id === routineId);
         if (!current) return;
-        await cancelReminder(current.notificationId);
-        const updated: Routine = { ...current, enabled: !current.enabled, notificationId: undefined };
-        if (updated.enabled) updated.notificationId = await scheduleRoutineReminder(updated);
-        set((state) => ({ routines: state.routines.map((routine) => (routine.id === routineId ? updated : routine)) }));
+        await cancelReminders([current.notificationId, ...(current.notificationIds ?? [])]);
+        const updated: Routine = {
+          ...current,
+          days: current.days?.length ? current.days : [0, 1, 2, 3, 4, 5, 6],
+          remindBeforeMinutes: current.remindBeforeMinutes ?? 0,
+          enabled: !current.enabled,
+          notificationId: undefined,
+          notificationIds: undefined,
+          updatedAt: new Date().toISOString(),
+          syncVersion: (current.syncVersion ?? 0) + 1,
+        };
+        if (updated.enabled) updated.notificationIds = await scheduleRoutineReminders(updated);
+        set((state) => ({
+          routines: state.routines.map((routine) => (routine.id === routineId ? updated : routine)),
+          syncQueue: enqueueLatest(state.syncQueue, queueOperation('routine', routineId, 'upsert')),
+        }));
       },
       enableAllRoutines: async () => {
         const routines = await Promise.all(get().routines.map(async (routine) => {
-          await cancelReminder(routine.notificationId);
-          const enabled: Routine = { ...routine, enabled: true, notificationId: undefined };
-          enabled.notificationId = await scheduleRoutineReminder(enabled);
+          await cancelReminders([routine.notificationId, ...(routine.notificationIds ?? [])]);
+          const enabled: Routine = {
+            ...routine,
+            days: routine.days?.length ? routine.days : [0, 1, 2, 3, 4, 5, 6],
+            remindBeforeMinutes: routine.remindBeforeMinutes ?? 0,
+            enabled: true,
+            notificationId: undefined,
+            notificationIds: undefined,
+            updatedAt: new Date().toISOString(),
+            syncVersion: (routine.syncVersion ?? 0) + 1,
+          };
+          enabled.notificationIds = await scheduleRoutineReminders(enabled);
           return enabled;
         }));
-        set({ routines });
-      },
-      setSyncStatus: (syncStatus, syncError) => set({ syncStatus, ...(syncError ? { syncError } : { syncError: undefined }) }),
-      queueTasksForSync: (taskIds) => set((state) => {
-        const selected = new Set(taskIds);
-        return {
-          syncQueue: state.tasks.filter((task) => selected.has(task.id)).reduce(
-            (queue, task) => enqueueLatest(queue, queueOperation(task.id, 'upsert')),
+        set((state) => ({
+          routines,
+          syncQueue: routines.reduce(
+            (queue, routine) => enqueueLatest(queue, queueOperation('routine', routine.id, 'upsert')),
             state.syncQueue,
           ),
-        };
-      }),
+        }));
+      },
+      setSyncStatus: (syncStatus, syncError) => set({ syncStatus, ...(syncError ? { syncError } : { syncError: undefined }) }),
+      queueEntitiesForSync: (entities) => set((state) => ({
+        syncQueue: entities.reduce(
+          (queue, item) => enqueueLatest(queue, queueOperation(item.entity, item.entityId, 'upsert')),
+          state.syncQueue,
+        ),
+      })),
       applySyncResult: async (changes, acceptedOperationIds, syncCursor, serverTime) => {
         const accepted = new Set(acceptedOperationIds);
         const remindersToCancel: string[] = [];
-        const remindersToSchedule: Task[] = [];
+        const tasksToSchedule: Task[] = [];
+        const eventsToSchedule: CalendarEvent[] = [];
+        const routinesToSchedule: Routine[] = [];
         set((state) => {
           const nextTasks = [...state.tasks];
+          const nextEvents = [...state.events];
+          const nextRoutines = [...state.routines];
           for (const change of changes) {
-            const pending = state.syncQueue.find((operation) => operation.entityId === change.entityId && !accepted.has(operation.id));
+            const pending = state.syncQueue.find((operation) => operation.entity === change.entity && operation.entityId === change.entityId && !accepted.has(operation.id));
             if (pending && pending.createdAt.localeCompare(change.updatedAt) > 0) continue;
-            const index = nextTasks.findIndex((task) => task.id === change.entityId);
-            const current = index >= 0 ? nextTasks[index] : undefined;
-            if (current && current.updatedAt.localeCompare(change.updatedAt) > 0) continue;
-            if (current?.notificationId) remindersToCancel.push(current.notificationId);
-            if (change.operation === 'delete') {
-              if (index >= 0) nextTasks.splice(index, 1);
-              continue;
+            if (change.entity === 'task') {
+              const index = nextTasks.findIndex((task) => task.id === change.entityId);
+              const current = index >= 0 ? nextTasks[index] : undefined;
+              if (current && (current.updatedAt ?? '').localeCompare(change.updatedAt) > 0) continue;
+              if (current?.notificationId) remindersToCancel.push(current.notificationId);
+              if (change.operation === 'delete') { if (index >= 0) nextTasks.splice(index, 1); continue; }
+              if (!change.payload) continue;
+              const incoming: Task = { ...change.payload, notificationId: undefined };
+              if (!incoming.completed && incoming.reminderEnabled) tasksToSchedule.push(incoming);
+              if (index >= 0) nextTasks[index] = incoming; else nextTasks.push(incoming);
+            } else if (change.entity === 'event') {
+              const index = nextEvents.findIndex((event) => event.id === change.entityId);
+              const current = index >= 0 ? nextEvents[index] : undefined;
+              if (current && (current.updatedAt ?? '').localeCompare(change.updatedAt) > 0) continue;
+              if (current?.notificationId) remindersToCancel.push(current.notificationId);
+              if (change.operation === 'delete') { if (index >= 0) nextEvents.splice(index, 1); continue; }
+              if (!change.payload) continue;
+              const incoming: CalendarEvent = { ...change.payload, notificationId: undefined };
+              if (incoming.reminderEnabled) eventsToSchedule.push(incoming);
+              if (index >= 0) nextEvents[index] = incoming; else nextEvents.push(incoming);
+            } else {
+              const index = nextRoutines.findIndex((routine) => routine.id === change.entityId);
+              const current = index >= 0 ? nextRoutines[index] : undefined;
+              if (current && (current.updatedAt ?? '').localeCompare(change.updatedAt) > 0) continue;
+              if (current) remindersToCancel.push(current.notificationId ?? '', ...(current.notificationIds ?? []));
+              if (change.operation === 'delete') { if (index >= 0) nextRoutines.splice(index, 1); continue; }
+              if (!change.payload) continue;
+              const incoming: Routine = { ...change.payload, notificationId: undefined, notificationIds: undefined };
+              if (incoming.enabled) routinesToSchedule.push(incoming);
+              if (index >= 0) nextRoutines[index] = incoming; else nextRoutines.push(incoming);
             }
-            if (!change.payload) continue;
-            const incoming: Task = { ...change.payload, notificationId: undefined };
-            if (!incoming.completed && incoming.reminderEnabled) remindersToSchedule.push(incoming);
-            if (index >= 0) nextTasks[index] = incoming;
-            else nextTasks.push(incoming);
           }
           return {
             tasks: nextTasks,
+            events: nextEvents,
+            routines: nextRoutines,
             syncQueue: state.syncQueue.filter((operation) => !accepted.has(operation.id)),
             syncCursor,
             syncStatus: 'idle',
@@ -192,14 +282,30 @@ export const useDayDeskStore = create<DayDeskStore>()(
             lastSyncedAt: serverTime,
           };
         });
-        await Promise.all(remindersToCancel.map((identifier) => cancelReminder(identifier)));
-        for (const task of remindersToSchedule) {
-          const notificationId = await scheduleTaskReminder(task);
-          set((state) => ({
-            tasks: state.tasks.map((current) => current.id === task.id && current.updatedAt === task.updatedAt
-              ? { ...current, notificationId }
-              : current),
-          }));
+        await cancelReminders(remindersToCancel);
+        for (const task of tasksToSchedule) {
+          const notificationId = await scheduleTaskReminder(task, false);
+          if (notificationId && !get().tasks.some((current) => current.id === task.id && current.updatedAt === task.updatedAt)) {
+            await cancelReminder(notificationId);
+            continue;
+          }
+          set((state) => ({ tasks: state.tasks.map((current) => current.id === task.id && current.updatedAt === task.updatedAt ? { ...current, notificationId } : current) }));
+        }
+        for (const event of eventsToSchedule) {
+          const notificationId = await scheduleEventReminder(event, false);
+          if (notificationId && !get().events.some((current) => current.id === event.id && current.updatedAt === event.updatedAt)) {
+            await cancelReminder(notificationId);
+            continue;
+          }
+          set((state) => ({ events: state.events.map((current) => current.id === event.id && current.updatedAt === event.updatedAt ? { ...current, notificationId } : current) }));
+        }
+        for (const routine of routinesToSchedule) {
+          const notificationIds = await scheduleRoutineReminders(routine, false);
+          if (notificationIds && !get().routines.some((current) => current.id === routine.id && current.updatedAt === routine.updatedAt)) {
+            await cancelReminders(notificationIds);
+            continue;
+          }
+          set((state) => ({ routines: state.routines.map((current) => current.id === routine.id && current.updatedAt === routine.updatedAt ? { ...current, notificationIds } : current) }));
         }
       },
       markHydrated: () => set({ hydrated: true }),

@@ -1,4 +1,4 @@
-export type EntityType = 'task';
+export type EntityType = 'task' | 'event' | 'routine';
 export type SyncOperationType = 'upsert' | 'delete';
 
 export interface DesktopTaskRecurrence {
@@ -23,13 +23,43 @@ export interface SyncedTask {
   syncVersion: number;
 }
 
+export interface SyncedEvent {
+  id: string;
+  title: string;
+  startsAt: string;
+  endsAt: string;
+  type: 'meeting' | 'meal' | 'focus' | 'personal';
+  location?: string;
+  remindBeforeMinutes: number;
+  reminderEnabled: boolean;
+  allDay?: boolean;
+  allDayStartDate?: string;
+  allDayEndDate?: string;
+  updatedAt: string;
+  syncVersion: number;
+}
+
+export interface SyncedRoutine {
+  id: string;
+  title: string;
+  time: string;
+  days: number[];
+  kind: 'water' | 'meal' | 'break' | 'focus' | 'custom';
+  remindBeforeMinutes: number;
+  enabled: boolean;
+  updatedAt: string;
+  syncVersion: number;
+}
+
+export type SyncedPayload = SyncedTask | SyncedEvent | SyncedRoutine;
+
 export interface ClientChange {
   id: string;
   entity: EntityType;
   entityId: string;
   operation: SyncOperationType;
   updatedAt: string;
-  payload?: SyncedTask;
+  payload?: SyncedPayload;
 }
 
 export interface ServerChange {
@@ -38,7 +68,7 @@ export interface ServerChange {
   entityId: string;
   operation: SyncOperationType;
   updatedAt: string;
-  payload?: SyncedTask;
+  payload?: SyncedPayload;
 }
 
 export interface SyncRequestBody {

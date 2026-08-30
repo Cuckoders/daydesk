@@ -48,18 +48,19 @@ import { connectOAuth, disconnectOAuth, downloadOAuthAttachment, getOAuthMessage
 import { deleteRemoteCalendarEvent, syncRemoteCalendar, toCalendarEvent, upsertRemoteCalendarEvent } from "./services/calendar";
 import { loadState, saveState, stateChannel } from "./services/storage";
 import {
+  createSyncSnapshot,
   disconnectDesktopSyncDevice,
   getDesktopSyncStatus,
-  mergeRemoteTaskChanges,
-  recordTaskChanges,
+  mergeRemoteChanges,
+  recordSyncChanges,
   registerDesktopSyncDevice,
-  syncDesktopTasks,
+  syncDesktopData,
   type SyncDeviceStatus,
 } from "./services/sync";
 import type { AppState, CalendarEvent, MailAccount, MailAttachment, MailMessage, Routine, RoutineKind, Task, TaskRecurrenceMode } from "./types";
 
 type View = "today" | "tasks" | "calendar" | "mail" | "widgets";
-type TaskSyncPhase = "idle" | "syncing" | "error";
+type SyncPhase = "idle" | "syncing" | "error";
 
 const navItems: { id: View; label: string; icon: typeof LayoutDashboard }[] = [
   { id: "today", label: "Сегодня", icon: LayoutDashboard },
@@ -321,7 +322,7 @@ function Sidebar({ view, onChange, open, onClose, onSettings, unreadCount, syncL
 function SettingsModal({ onClose, syncDevice, syncPhase, syncError, lastSyncedAt, onConnectSync, onSyncNow, onDisconnectSync }: {
   onClose: () => void;
   syncDevice?: SyncDeviceStatus;
-  syncPhase: TaskSyncPhase;
+  syncPhase: SyncPhase;
   syncError: string;
   lastSyncedAt?: string;
   onConnectSync: (apiUrl: string, setupCode: string, deviceName: string) => Promise<void>;
@@ -379,7 +380,7 @@ function SettingsModal({ onClose, syncDevice, syncPhase, syncError, lastSyncedAt
     try {
       await onSyncNow();
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "Не удалось синхронизировать задачи");
+      setError(reason instanceof Error ? reason.message : "Не удалось синхронизировать данные");
     } finally {
       setWorking(false);
     }
@@ -407,12 +408,12 @@ function SettingsModal({ onClose, syncDevice, syncPhase, syncError, lastSyncedAt
           <div className="setting-row"><div className="setting-icon"><Rocket size={19} /></div><div><strong>Запускать при входе в систему</strong><span>DayDesk запустится скрыто, чтобы напоминания работали сразу после входа в Windows или macOS.</span></div><button type="button" className={`setting-toggle ${autostart ? "active" : ""}`} role="switch" aria-checked={autostart} disabled={loading || working} onClick={() => void toggleAutostart()}><i /></button></div>
           {syncDevice ? (
             <div className="sync-settings-card">
-              <div className="sync-settings-head"><div className="setting-icon"><Server size={19} /></div><div><strong>Синхронизация задач подключена</strong><span>{syncDevice.deviceName} · {syncDevice.apiUrl}</span>{lastSyncedAt ? <small>Последний обмен: {new Intl.DateTimeFormat("ru-RU", { hour: "2-digit", minute: "2-digit", day: "numeric", month: "short" }).format(new Date(lastSyncedAt))}</small> : null}</div><span className={`sync-dot ${syncPhase}`} /></div>
+              <div className="sync-settings-head"><div className="setting-icon"><Server size={19} /></div><div><strong>Синхронизация DayDesk подключена</strong><span>{syncDevice.deviceName} · {syncDevice.apiUrl}</span>{lastSyncedAt ? <small>Последний обмен: {new Intl.DateTimeFormat("ru-RU", { hour: "2-digit", minute: "2-digit", day: "numeric", month: "short" }).format(new Date(lastSyncedAt))}</small> : null}</div><span className={`sync-dot ${syncPhase}`} /></div>
               <div className="sync-settings-actions"><button type="button" className="secondary-button" disabled={working || syncPhase === "syncing"} onClick={() => void runSync()}>{syncPhase === "syncing" ? <LoaderCircle className="spin" size={15} /> : <RefreshCw size={15} />}Синхронизировать</button><button type="button" className="danger-button" disabled={working || syncPhase === "syncing"} onClick={() => void disconnectSync()}><Trash2 size={15} />Отключить</button></div>
             </div>
           ) : (
             <form className="sync-settings-card sync-connect-form" onSubmit={connectSync}>
-              <div className="sync-settings-head"><div className="setting-icon"><Server size={19} /></div><div><strong>Общие задачи на всех устройствах</strong><span>Подключите настольный DayDesk к тому же серверу, что и мобильное приложение.</span></div></div>
+              <div className="sync-settings-head"><div className="setting-icon"><Server size={19} /></div><div><strong>Общие планы на всех устройствах</strong><span>Синхронизируйте задачи, локальные встречи и «Ритм дня» с мобильным приложением.</span></div></div>
               <div className="sync-fields"><label>Адрес сервера<input type="url" required maxLength={500} autoComplete="url" value={apiUrl} onChange={(event) => setApiUrl(event.target.value)} placeholder="https://sync.example.com" /></label><label>Название устройства<input required maxLength={80} autoComplete="off" value={deviceName} onChange={(event) => setDeviceName(event.target.value)} /></label><label className="field-full">Setup-код<input type="password" required minLength={12} maxLength={256} autoComplete="one-time-code" value={setupCode} onChange={(event) => setSetupCode(event.target.value)} placeholder="Код из настроек сервера" /></label></div>
               <button className="primary-button" type="submit" disabled={working}>{working ? <LoaderCircle className="spin" size={15} /> : <LockKeyhole size={15} />}Подключить безопасно</button>
             </form>
@@ -854,13 +855,13 @@ function EventEditor({ existing, accounts, onSave, onDelete, onClose }: { existi
         <div><span className="eyebrow">{existing ? "РЕДАКТИРОВАНИЕ" : "НОВОЕ СОБЫТИЕ"}</span><h2>{existing ? "Изменить событие" : "Добавить в расписание"}</h2></div>
         <button type="button" className="icon-button modal-close" onClick={onClose} aria-label="Закрыть"><X size={20} /></button>
         <div className="form-grid">
-          <label className="field-full">Название<input autoFocus value={title} onChange={(event) => setTitle(event.target.value)} placeholder="Например, встреча с командой" /></label>
+          <label className="field-full">Название<input autoFocus maxLength={300} value={title} onChange={(event) => setTitle(event.target.value)} placeholder="Например, встреча с командой" /></label>
           <label>Тип<select value={type} onChange={(event) => setType(event.target.value as CalendarEvent["type"])}><option value="meeting">Встреча</option><option value="meal">Обед или ужин</option><option value="focus">Фокус-время</option><option value="personal">Личное</option></select></label>
           <label>Дата начала<input type="date" value={date} onChange={(event) => setDate(event.target.value)} /></label>
           <label>Дата окончания<input type="date" value={endDate} min={date} onChange={(event) => setEndDate(event.target.value)} /></label>
           <label>Начало<input type="time" value={startsAt} onChange={(event) => { setStartsAt(event.target.value); setError(""); }} /></label>
           <label>Окончание<input type="time" value={endsAt} onChange={(event) => { setEndsAt(event.target.value); setError(""); }} /></label>
-          <label className="field-full">Место или ссылка<input value={location} onChange={(event) => setLocation(event.target.value)} placeholder="Необязательно" /></label>
+          <label className="field-full">Место или ссылка<input maxLength={500} value={location} onChange={(event) => setLocation(event.target.value)} placeholder="Необязательно" /></label>
           <label>Напомнить<select value={usesDefaultReminder ? "default" : reminderEnabled ? `minutes:${reminder}` : "none"} onChange={(event) => { const value = event.target.value; setReminderDirty(true); setUsesDefaultReminder(value === "default"); setReminderEnabled(value !== "none"); if (value.startsWith("minutes:")) setReminder(Number(value.slice(8))); }}>{usesDefaultReminder ? <option value="default">По умолчанию календаря</option> : null}<option value="none">Не напоминать</option>{calendarAccountId !== "local" ? <option value="minutes:0">В момент начала</option> : null}<option value="minutes:5">За 5 минут</option><option value="minutes:10">За 10 минут</option><option value="minutes:15">За 15 минут</option><option value="minutes:30">За 30 минут</option><option value="minutes:60">За 1 час</option></select></label>
           <label>Календарь<select value={calendarAccountId} disabled={Boolean(existing?.calendar)} onChange={(event) => setCalendarAccountId(event.target.value)}><option value="local">Только DayDesk</option>{calendarAccounts.map((account) => <option key={account.id} value={account.id}>{account.provider === "gmail" ? "Google" : "Outlook"} · {account.address}</option>)}</select></label>
         </div>
@@ -1454,14 +1455,14 @@ export default function App() {
   const [mailCacheReady, setMailCacheReady] = useState(false);
   const [reminderScheduleTick, setReminderScheduleTick] = useState(0);
   const [syncDevice, setSyncDevice] = useState<SyncDeviceStatus>();
-  const [syncPhase, setSyncPhase] = useState<TaskSyncPhase>("idle");
+  const [syncPhase, setSyncPhase] = useState<SyncPhase>("idle");
   const [syncError, setSyncError] = useState("");
   const [lastSyncedAt, setLastSyncedAt] = useState<string>();
   const searchInput = useRef<HTMLInputElement>(null);
   const mailSyncRunning = useRef(false);
   const calendarSyncRunning = useRef(false);
-  const latestTasks = useRef(state.tasks);
-  const taskSnapshot = useRef(state.tasks);
+  const latestSyncSnapshot = useRef(createSyncSnapshot(state));
+  const syncSnapshot = useRef(createSyncSnapshot(state));
   const mailAccountsKey = state.accounts
     .map((account) => [account.id, account.provider, account.authType, account.address, account.imapHost ?? "", account.imapPort ?? ""].join(":"))
     .join("|");
@@ -1470,42 +1471,43 @@ export default function App() {
     .map((account) => [account.id, account.provider, account.calendarEnabled ? "on" : "off"].join(":"))
     .join("|");
 
-  latestTasks.current = state.tasks;
+  latestSyncSnapshot.current = createSyncSnapshot(state);
 
-  const runTaskSync = useCallback(async () => {
+  const runDataSync = useCallback(async () => {
     if (isWidget) return;
     setSyncPhase("syncing");
     setSyncError("");
     try {
-      const result = await syncDesktopTasks(latestTasks.current);
+      const result = await syncDesktopData(latestSyncSnapshot.current);
       if (!result) {
         setSyncPhase("idle");
         return;
       }
       if (result.changes.length > 0) {
         setState((current) => {
-          const tasks = mergeRemoteTaskChanges(current.tasks, result.changes);
-          taskSnapshot.current = tasks;
-          return { ...current, tasks };
+          const externalEvents = current.events.filter((event) => event.calendar || event.routineId);
+          const merged = mergeRemoteChanges(createSyncSnapshot(current), result.changes);
+          syncSnapshot.current = merged;
+          return { ...current, tasks: merged.tasks, events: [...externalEvents, ...merged.events].sort((left, right) => left.startsAt.localeCompare(right.startsAt)), routines: merged.routines };
         });
       }
       setLastSyncedAt(result.serverTime);
       setSyncPhase("idle");
     } catch (reason) {
-      const message = reason instanceof Error ? reason.message : "Не удалось синхронизировать задачи";
+      const message = reason instanceof Error ? reason.message : "Не удалось синхронизировать данные";
       setSyncError(message);
       setSyncPhase("error");
       throw reason;
     }
   }, [isWidget]);
 
-  const connectTaskSync = useCallback(async (apiUrl: string, setupCode: string, deviceName: string) => {
+  const connectDataSync = useCallback(async (apiUrl: string, setupCode: string, deviceName: string) => {
     const device = await registerDesktopSyncDevice(apiUrl, setupCode, deviceName);
     setSyncDevice(device);
-    await runTaskSync();
-  }, [runTaskSync]);
+    await runDataSync();
+  }, [runDataSync]);
 
-  const disconnectTaskSync = useCallback(async () => {
+  const disconnectDataSync = useCallback(async () => {
     await disconnectDesktopSyncDevice();
     setSyncDevice(undefined);
     setSyncPhase("idle");
@@ -1520,9 +1522,10 @@ export default function App() {
 
   useEffect(() => {
     if (isWidget) return;
-    recordTaskChanges(taskSnapshot.current, state.tasks);
-    taskSnapshot.current = state.tasks;
-  }, [isWidget, state.tasks]);
+    const current = createSyncSnapshot(state);
+    recordSyncChanges(syncSnapshot.current, current);
+    syncSnapshot.current = current;
+  }, [isWidget, state.events, state.routines, state.tasks]);
 
   useEffect(() => {
     if (isWidget) return;
@@ -1530,14 +1533,14 @@ export default function App() {
     void getDesktopSyncStatus()
       .then((device) => { if (!cancelled) setSyncDevice(device); })
       .catch((reason: unknown) => { if (!cancelled) setSyncError(reason instanceof Error ? reason.message : "Не удалось проверить синхронизацию"); });
-    const initialTimer = window.setTimeout(() => void runTaskSync().catch(() => undefined), 5_000);
-    const interval = window.setInterval(() => void runTaskSync().catch(() => undefined), 30_000);
+    const initialTimer = window.setTimeout(() => void runDataSync().catch(() => undefined), 5_000);
+    const interval = window.setInterval(() => void runDataSync().catch(() => undefined), 30_000);
     return () => {
       cancelled = true;
       window.clearTimeout(initialTimer);
       window.clearInterval(interval);
     };
-  }, [isWidget, runTaskSync]);
+  }, [isWidget, runDataSync]);
 
   useEffect(() => {
     if (isWidget) return;
@@ -1796,7 +1799,7 @@ export default function App() {
 
   return (
     <div className="app-shell">
-      <Sidebar view={view} onChange={setView} open={sidebarOpen} onClose={() => setSidebarOpen(false)} onSettings={() => { setSettingsOpen(true); setSidebarOpen(false); }} unreadCount={state.messages.filter((message) => message.unread).length} syncLabel={syncPhase === "syncing" ? "Синхронизация…" : syncPhase === "error" ? "Ошибка синхронизации" : syncDevice ? "Задачи синхронизированы" : "Только на этом устройстве"} />
+      <Sidebar view={view} onChange={setView} open={sidebarOpen} onClose={() => setSidebarOpen(false)} onSettings={() => { setSettingsOpen(true); setSidebarOpen(false); }} unreadCount={state.messages.filter((message) => message.unread).length} syncLabel={syncPhase === "syncing" ? "Синхронизация…" : syncPhase === "error" ? "Ошибка синхронизации" : syncDevice ? "Данные синхронизированы" : "Только на этом устройстве"} />
       {sidebarOpen ? <button className="sidebar-scrim" onClick={() => setSidebarOpen(false)} aria-label="Закрыть меню" /> : null}
       <div className="app-content">
         <header className="topbar"><button className="icon-button menu-button" onClick={() => setSidebarOpen(true)}><Menu size={20} /></button><div className="search-box"><Search size={18} /><input ref={searchInput} value={searchQuery} aria-label="Поиск писем" maxLength={200} placeholder="Найти письмо…" onChange={(event) => { setSearchQuery(event.target.value); if (event.target.value.trim()) setView("mail"); }} />{searchQuery ? <button className="search-clear" onClick={() => setSearchQuery("")} aria-label="Очистить поиск"><X size={15} /></button> : <kbd>Ctrl K</kbd>}</div><div className="top-actions"><button className="icon-button notification-button"><Bell size={19} /><i /></button><button className="primary-button quick-add" onClick={openNewTask}><Plus size={18} />Добавить</button></div></header>
@@ -1805,7 +1808,7 @@ export default function App() {
       </div>
       {taskEditor ? <TaskEditor existing={taskEditor === "new" ? undefined : taskEditor} onSave={saveTask} onDelete={deleteTask} onClose={() => setTaskEditor(null)} /> : null}
       {eventEditor ? <EventEditor existing={eventEditor === "new" ? undefined : eventEditor} accounts={state.accounts} onSave={saveEvent} onDelete={deleteEvent} onClose={() => setEventEditor(null)} /> : null}
-      {settingsOpen ? <SettingsModal onClose={() => setSettingsOpen(false)} syncDevice={syncDevice} syncPhase={syncPhase} syncError={syncError} lastSyncedAt={lastSyncedAt} onConnectSync={connectTaskSync} onSyncNow={runTaskSync} onDisconnectSync={disconnectTaskSync} /> : null}
+      {settingsOpen ? <SettingsModal onClose={() => setSettingsOpen(false)} syncDevice={syncDevice} syncPhase={syncPhase} syncError={syncError} lastSyncedAt={lastSyncedAt} onConnectSync={connectDataSync} onSyncNow={runDataSync} onDisconnectSync={disconnectDataSync} /> : null}
     </div>
   );
 }

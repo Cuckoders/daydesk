@@ -34,17 +34,30 @@ export interface CalendarEvent {
   endsAt: string;
   type: CalendarEventType;
   location?: string;
+  reminderEnabled: boolean;
+  remindBeforeMinutes: number;
+  allDay?: boolean;
+  allDayStartDate?: string;
+  allDayEndDate?: string;
+  notificationId?: string;
+  updatedAt: string;
+  syncVersion: number;
 }
 
-export type RoutineKind = 'water' | 'meal' | 'break' | 'focus';
+export type RoutineKind = 'water' | 'meal' | 'break' | 'focus' | 'custom';
 
 export interface Routine {
   id: string;
   title: string;
   time: string;
+  days: number[];
   kind: RoutineKind;
+  remindBeforeMinutes: number;
   enabled: boolean;
   notificationId?: string;
+  notificationIds?: string[];
+  updatedAt: string;
+  syncVersion: number;
 }
 
 export type MailProvider = 'gmail' | 'outlook' | 'imap';
@@ -77,14 +90,17 @@ export interface SyncOperation {
   createdAt: string;
 }
 
-export interface RemoteSyncChange {
+interface RemoteSyncChangeBase {
   sequence: number;
-  entity: 'task';
   entityId: string;
   operation: 'upsert' | 'delete';
   updatedAt: string;
-  payload?: Omit<Task, 'notificationId'>;
 }
+
+export type RemoteSyncChange =
+  | (RemoteSyncChangeBase & { entity: 'task'; payload?: Omit<Task, 'notificationId'> })
+  | (RemoteSyncChangeBase & { entity: 'event'; payload?: Omit<CalendarEvent, 'notificationId'> })
+  | (RemoteSyncChangeBase & { entity: 'routine'; payload?: Omit<Routine, 'notificationId' | 'notificationIds'> });
 
 export type SyncStatus = 'idle' | 'syncing' | 'offline' | 'error';
 
@@ -110,4 +126,14 @@ export interface NewTaskInput {
   reminderEnabled: boolean;
   remindBeforeMinutes: number;
   recurrence: TaskRecurrenceMode;
+}
+
+export interface NewEventInput {
+  title: string;
+  startsAt: string;
+  endsAt: string;
+  type: CalendarEventType;
+  location?: string;
+  reminderEnabled: boolean;
+  remindBeforeMinutes: number;
 }

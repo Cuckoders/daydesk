@@ -18,6 +18,7 @@ const routineIcons: Record<Routine['kind'], React.ComponentProps<typeof Ionicons
   meal: 'restaurant-outline',
   break: 'walk-outline',
   focus: 'moon-outline',
+  custom: 'sparkles-outline',
 };
 
 export default function TodayScreen() {
@@ -44,6 +45,7 @@ export default function TodayScreen() {
   const openEditor = useCallback((taskId?: string) => {
     router.push(taskId ? { pathname: '/task-editor', params: { id: taskId } } : '/task-editor');
   }, [router]);
+  const openEventEditor = useCallback((eventId: string) => router.push({ pathname: '/event-editor', params: { id: eventId } } as unknown as Href), [router]);
   const onToggle = useCallback((taskId: string) => void toggleTask(taskId), [toggleTask]);
   const renderTask = useCallback(
     ({ item }: { item: Task }) => <TaskCard task={item} onToggle={onToggle} onEdit={openEditor} compact />,
@@ -116,7 +118,7 @@ export default function TodayScreen() {
 
       <SectionHeader title="Ближайшие события" actionLabel="Календарь" onAction={() => router.push('/calendar')} />
       <View style={styles.eventList}>
-        {todayEvents.length ? todayEvents.slice(0, 3).map((event) => <EventCard key={event.id} event={event} />) : (
+        {todayEvents.length ? todayEvents.slice(0, 3).map((event) => <EventCard key={event.id} event={event} onPress={openEventEditor} />) : (
           <Text style={[styles.emptyText, { color: colors.textMuted }]}>На сегодня встреч больше нет.</Text>
         )}
       </View>

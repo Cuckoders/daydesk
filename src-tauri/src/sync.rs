@@ -1,4 +1,4 @@
-use chrono::DateTime;
+use chrono::{DateTime, NaiveDate};
 use reqwest::blocking::{Client, Response};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::{io::Read, net::IpAddr, time::Duration};
@@ -94,6 +94,39 @@ pub struct SyncedTask {
     sync_version: u32,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SyncedEvent {
+    id: String,
+    title: String,
+    starts_at: String,
+    ends_at: String,
+    #[serde(rename = "type")]
+    event_type: String,
+    location: Option<String>,
+    remind_before_minutes: u32,
+    reminder_enabled: bool,
+    all_day: Option<bool>,
+    all_day_start_date: Option<String>,
+    all_day_end_date: Option<String>,
+    updated_at: String,
+    sync_version: u32,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SyncedRoutine {
+    id: String,
+    title: String,
+    time: String,
+    days: Vec<u8>,
+    kind: String,
+    remind_before_minutes: u32,
+    enabled: bool,
+    updated_at: String,
+    sync_version: u32,
+}
+
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ClientChange {
@@ -103,7 +136,7 @@ pub struct ClientChange {
     operation: String,
     updated_at: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    payload: Option<SyncedTask>,
+    payload: Option<serde_json::Value>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -122,7 +155,7 @@ pub struct ServerChange {
     operation: String,
     updated_at: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    payload: Option<SyncedTask>,
+    payload: Option<serde_json::Value>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -257,13 +290,122 @@ fn validate_task(task: &SyncedTask) -> Result<(), String> {
     Ok(())
 }
 
+fn validate_event(event: &SyncedEvent) -> Result<(), String> {
+    let starts_at = DateTime::parse_from_rfc3339(&event.starts_at)
+        .map_err(|_| "Некорректное начало события".to_string())?;
+    let ends_at = DateTime::parse_from_rfc3339(&event.ends_at)
+        .map_err(|_| "Некорректное окончание события".to_string())?;
+    if !valid_identifier(&event.id)
+        || event.title.trim().is_empty()
+        || event.title.len() > 300
+        || event.title.chars().any(char::is_control)
+        || ends_at <= starts_at
+        || !matches!(
+            event.event_type.as_str(),
+            "meeting" | "meal" | "focus" | "personal"
+        )
+        || event
+            .location
+            .as_ref()
+            .is_some_and(|value| value.len() > 500 || value.chars().any(char::is_control))
+        || event.remind_before_minutes > 10_080
+        || !valid_iso(&event.updated_at)
+        || event.sync_version == 0
+    {
+        return Err("Событие содержит некорректные данные".into());
+    }
+    if event.all_day.unwrap_or(false) {
+        let start = event
+            .all_day_start_date
+            .as_deref()
+            .and_then(|value| NaiveDate::parse_from_str(value, "%Y-%m-%d").ok());
+        let end = event
+            .all_day_end_date
+            .as_deref()
+            .and_then(|value| NaiveDate::parse_from_str(value, "%Y-%m-%d").ok());
+        if !matches!((start, end), (Some(start), Some(end)) if end > start) {
+            return Err("Событие на весь день содержит некорректный диапазон".into());
+        }
+    } else if event.all_day_start_date.is_some() || event.all_day_end_date.is_some() {
+        return Err("Обычное событие не должно содержать даты всего дня".into());
+    }
+    let _ = event.reminder_enabled;
+    Ok(())
+}
+
+fn validate_routine(routine: &SyncedRoutine) -> Result<(), String> {
+    let valid_time = routine.time.len() == 5
+        && routine.time.as_bytes().get(2) == Some(&b':')
+        && routine.time[..2]
+            .parse::<u8>()
+            .is_ok_and(|hours| hours <= 23)
+        && routine.time[3..]
+            .parse::<u8>()
+            .is_ok_and(|minutes| minutes <= 59);
+    if !valid_identifier(&routine.id)
+        || routine.title.trim().is_empty()
+        || routine.title.len() > 100
+        || routine.title.chars().any(char::is_control)
+        || !valid_time
+        || routine.days.is_empty()
+        || routine.days.len() > 7
+        || routine.days.iter().any(|day| *day > 6)
+        || !matches!(
+            routine.kind.as_str(),
+            "water" | "meal" | "break" | "focus" | "custom"
+        )
+        || routine.remind_before_minutes > 10_080
+        || !valid_iso(&routine.updated_at)
+        || routine.sync_version == 0
+    {
+        return Err("Ритуал содержит некорректные данные".into());
+    }
+    let _ = routine.enabled;
+    Ok(())
+}
+
+fn validate_payload(
+    entity: &str,
+    entity_id: &str,
+    updated_at: &str,
+    payload: &serde_json::Value,
+) -> Result<(), String> {
+    match entity {
+        "task" => {
+            let task: SyncedTask = serde_json::from_value(payload.clone())
+                .map_err(|_| "Некорректные данные задачи".to_string())?;
+            if task.id != entity_id || task.updated_at != updated_at {
+                return Err("Изменение задачи не совпадает с его данными".into());
+            }
+            validate_task(&task)
+        }
+        "event" => {
+            let event: SyncedEvent = serde_json::from_value(payload.clone())
+                .map_err(|_| "Некорректные данные события".to_string())?;
+            if event.id != entity_id || event.updated_at != updated_at {
+                return Err("Изменение события не совпадает с его данными".into());
+            }
+            validate_event(&event)
+        }
+        "routine" => {
+            let routine: SyncedRoutine = serde_json::from_value(payload.clone())
+                .map_err(|_| "Некорректные данные ритуала".to_string())?;
+            if routine.id != entity_id || routine.updated_at != updated_at {
+                return Err("Изменение ритуала не совпадает с его данными".into());
+            }
+            validate_routine(&routine)
+        }
+        _ => Err("Неизвестный тип синхронизируемых данных".into()),
+    }
+}
+
 fn validate_request(request: &SyncRequestBody) -> Result<(), String> {
     if request.changes.len() > MAX_CHANGES {
         return Err("За один раз можно синхронизировать не больше 500 изменений".into());
     }
     for change in &request.changes {
         if !valid_identifier(&change.id)
-            || change.entity != "task"
+            || !matches!(change.entity.as_str(), "task" | "event" | "routine")
             || !valid_identifier(&change.entity_id)
             || !matches!(change.operation.as_str(), "upsert" | "delete")
             || !valid_iso(&change.updated_at)
@@ -271,13 +413,14 @@ fn validate_request(request: &SyncRequestBody) -> Result<(), String> {
             return Err("Очередь синхронизации содержит некорректное изменение".into());
         }
         match (&*change.operation, &change.payload) {
-            ("upsert", Some(task))
-                if task.id == change.entity_id && task.updated_at == change.updated_at =>
-            {
-                validate_task(task)?
-            }
+            ("upsert", Some(payload)) => validate_payload(
+                &change.entity,
+                &change.entity_id,
+                &change.updated_at,
+                payload,
+            )?,
             ("delete", None) => {}
-            _ => return Err("Изменение задачи не совпадает с его данными".into()),
+            _ => return Err("Изменение не совпадает с его данными".into()),
         }
     }
     Ok(())
@@ -399,18 +542,19 @@ pub async fn exchange_sync_changes(request: SyncRequestBody) -> Result<SyncRespo
             return Err("Сервер вернул некорректный ответ синхронизации".into());
         }
         for change in &envelope.data.changes {
-            if change.entity != "task"
+            if !matches!(change.entity.as_str(), "task" | "event" | "routine")
                 || !valid_identifier(&change.entity_id)
                 || !valid_iso(&change.updated_at)
             {
                 return Err("Сервер вернул некорректное изменение".into());
             }
             match (&*change.operation, &change.payload) {
-                ("upsert", Some(task))
-                    if task.id == change.entity_id && task.updated_at == change.updated_at =>
-                {
-                    validate_task(task)?
-                }
+                ("upsert", Some(payload)) => validate_payload(
+                    &change.entity,
+                    &change.entity_id,
+                    &change.updated_at,
+                    payload,
+                )?,
                 ("delete", None) => {}
                 _ => return Err("Сервер вернул некорректное изменение".into()),
             }
@@ -456,5 +600,33 @@ mod tests {
         assert!(normalize_api_url("http://192.168.1.10:4310").is_ok());
         assert!(normalize_api_url("https://sync.example.com").is_ok());
         assert!(normalize_api_url("http://sync.example.com").is_err());
+    }
+
+    #[test]
+    fn validates_event_ranges_and_payload_identity() {
+        let updated_at = "2026-08-30T16:00:00.000Z";
+        let valid = serde_json::json!({
+            "id": "event-team", "title": "Встреча", "startsAt": "2026-09-01T10:00:00.000Z",
+            "endsAt": "2026-09-01T11:00:00.000Z", "type": "meeting", "location": "Переговорная",
+            "remindBeforeMinutes": 10, "reminderEnabled": true, "updatedAt": updated_at, "syncVersion": 1
+        });
+        assert!(validate_payload("event", "event-team", updated_at, &valid).is_ok());
+        let mut invalid = valid;
+        invalid["endsAt"] = serde_json::json!("2026-09-01T09:00:00.000Z");
+        assert!(validate_payload("event", "event-team", updated_at, &invalid).is_err());
+        assert!(validate_payload("event", "another-event", updated_at, &invalid).is_err());
+    }
+
+    #[test]
+    fn validates_routine_schedule() {
+        let updated_at = "2026-08-30T16:00:00.000Z";
+        let valid = serde_json::json!({
+            "id": "routine-lunch", "title": "Обед", "time": "13:00", "days": [1, 2, 3, 4, 5],
+            "kind": "meal", "remindBeforeMinutes": 10, "enabled": true, "updatedAt": updated_at, "syncVersion": 1
+        });
+        assert!(validate_payload("routine", "routine-lunch", updated_at, &valid).is_ok());
+        let mut invalid = valid;
+        invalid["days"] = serde_json::json!([]);
+        assert!(validate_payload("routine", "routine-lunch", updated_at, &invalid).is_err());
     }
 }

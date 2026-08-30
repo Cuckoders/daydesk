@@ -1,6 +1,6 @@
 import { memo } from 'react';
 import { Ionicons } from '@expo/vector-icons';
-import { StyleSheet, Text, View } from 'react-native';
+import { Pressable, StyleSheet, Text, View } from 'react-native';
 
 import { useAppColors } from '@/src/theme';
 import type { CalendarEvent } from '@/src/types';
@@ -13,14 +13,14 @@ const eventColors = {
   personal: '#8A4EA3',
 };
 
-export const EventCard = memo(function EventCard({ event }: { event: CalendarEvent }) {
+export const EventCard = memo(function EventCard({ event, onPress }: { event: CalendarEvent; onPress?: (eventId: string) => void }) {
   const colors = useAppColors();
   return (
-    <View style={[styles.card, { backgroundColor: colors.surface, borderColor: colors.border }]}>
+    <Pressable accessibilityLabel={`${event.title}, ${formatTime(event.startsAt)}`} accessibilityRole={onPress ? 'button' : undefined} disabled={!onPress} onPress={() => onPress?.(event.id)} style={({ pressed }) => [styles.card, { backgroundColor: colors.surface, borderColor: colors.border }, pressed && styles.pressed]}>
       <View style={[styles.marker, { backgroundColor: eventColors[event.type] }]} />
       <View style={styles.timeBlock}>
-        <Text style={[styles.time, { color: colors.text }]}>{formatTime(event.startsAt)}</Text>
-        <Text style={[styles.endTime, { color: colors.textMuted }]}>{formatTime(event.endsAt)}</Text>
+        <Text style={[styles.time, { color: colors.text }]}>{event.allDay ? 'Весь' : formatTime(event.startsAt)}</Text>
+        <Text style={[styles.endTime, { color: colors.textMuted }]}>{event.allDay ? 'день' : formatTime(event.endsAt)}</Text>
       </View>
       <View style={styles.body}>
         <Text numberOfLines={2} style={[styles.title, { color: colors.text }]}>{event.title}</Text>
@@ -31,7 +31,7 @@ export const EventCard = memo(function EventCard({ event }: { event: CalendarEve
           </View>
         ) : null}
       </View>
-    </View>
+    </Pressable>
   );
 });
 
@@ -45,4 +45,5 @@ const styles = StyleSheet.create({
   title: { fontSize: 16, lineHeight: 21, fontWeight: '600' },
   locationRow: { flexDirection: 'row', alignItems: 'center', gap: 4, marginTop: 5 },
   location: { flex: 1, fontSize: 13 },
+  pressed: { opacity: .72 },
 });

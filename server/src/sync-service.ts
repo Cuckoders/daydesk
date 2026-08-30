@@ -1,5 +1,5 @@
 import type { DayDeskDatabase } from './database.js';
-import type { ClientChange, ServerChange, SyncRequestBody, SyncResponseBody, SyncedTask } from './types.js';
+import type { ClientChange, EntityType, ServerChange, SyncRequestBody, SyncResponseBody, SyncedEvent, SyncedPayload, SyncedRoutine, SyncedTask } from './types.js';
 
 const PAGE_SIZE = 500;
 
@@ -11,7 +11,7 @@ interface EntityRow {
 
 interface ChangeRow {
   sequence: number;
-  entityType: 'task';
+  entityType: EntityType;
   entityId: string;
   operation: 'upsert' | 'delete';
   payload: string | null;
@@ -23,16 +23,38 @@ function isValidIsoDate(value: string) {
   return Number.isFinite(time) && new Date(time).toISOString() === value;
 }
 
+function isValidDateOnly(value: string) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const date = new Date(`${value}T00:00:00.000Z`);
+  return Number.isFinite(date.getTime()) && date.toISOString().slice(0, 10) === value;
+}
+
 function validateChange(change: ClientChange) {
   if (!isValidIsoDate(change.updatedAt)) throw new TypeError('Invalid change timestamp');
   if (change.operation === 'upsert') {
     if (!change.payload || change.payload.id !== change.entityId || change.payload.updatedAt !== change.updatedAt) {
       throw new TypeError('Change payload does not match its envelope');
     }
-    if (!isValidIsoDate(change.payload.dueAt)) throw new TypeError('Invalid task due date');
-    if (change.payload.snoozedUntil && !isValidIsoDate(change.payload.snoozedUntil)) throw new TypeError('Invalid task snooze date');
-    if (change.payload.desktopRecurrence?.mode === 'custom' && change.payload.desktopRecurrence.days.length === 0) {
-      throw new TypeError('Custom recurrence requires at least one day');
+    if (change.entity === 'task') {
+      const task = change.payload as SyncedTask;
+      if (!isValidIsoDate(task.dueAt)) throw new TypeError('Invalid task due date');
+      if (task.snoozedUntil && !isValidIsoDate(task.snoozedUntil)) throw new TypeError('Invalid task snooze date');
+      if (task.desktopRecurrence?.mode === 'custom' && task.desktopRecurrence.days.length === 0) {
+        throw new TypeError('Custom recurrence requires at least one day');
+      }
+    } else if (change.entity === 'event') {
+      const event = change.payload as SyncedEvent;
+      if (!isValidIsoDate(event.startsAt) || !isValidIsoDate(event.endsAt) || Date.parse(event.endsAt) <= Date.parse(event.startsAt)) {
+        throw new TypeError('Invalid event range');
+      }
+      if (event.allDay && (!event.allDayStartDate || !event.allDayEndDate || !isValidDateOnly(event.allDayStartDate)
+        || !isValidDateOnly(event.allDayEndDate) || event.allDayEndDate <= event.allDayStartDate)) {
+        throw new TypeError('Invalid all-day event range');
+      }
+      if (!event.allDay && (event.allDayStartDate || event.allDayEndDate)) throw new TypeError('Unexpected all-day event dates');
+    } else {
+      const routine = change.payload as SyncedRoutine;
+      if (routine.days.length === 0) throw new TypeError('Routine requires at least one day');
     }
   }
 }
@@ -93,7 +115,7 @@ export function synchronize(database: DayDeskDatabase, deviceId: string, request
       entityId: row.entityId,
       operation: row.operation,
       updatedAt: row.updatedAt,
-      ...(row.payload ? { payload: JSON.parse(row.payload) as SyncedTask } : {}),
+      ...(row.payload ? { payload: JSON.parse(row.payload) as SyncedPayload } : {}),
     }));
     const cursor = changes.at(-1)?.sequence ?? request.cursor;
     database.exec('COMMIT');

@@ -1,9 +1,11 @@
 import { useCallback, useMemo, useState } from 'react';
 import { Ionicons } from '@expo/vector-icons';
+import { type Href, useRouter } from 'expo-router';
 import { FlatList, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 
 import { AppScreen } from '@/components/AppScreen';
 import { EventCard } from '@/components/EventCard';
+import { FloatingAddButton } from '@/components/FloatingAddButton';
 import { useDayDeskStore } from '@/src/store/useDayDeskStore';
 import { useAppColors } from '@/src/theme';
 import type { CalendarEvent } from '@/src/types';
@@ -21,6 +23,7 @@ function getDays() {
 
 export default function CalendarScreen() {
   const colors = useAppColors();
+  const router = useRouter();
   const events = useDayDeskStore((state) => state.events);
   const days = useMemo(getDays, []);
   const [selectedDate, setSelectedDate] = useState(days[0]);
@@ -28,7 +31,11 @@ export default function CalendarScreen() {
     () => events.filter((event) => isSameDay(event.startsAt, selectedDate)).sort((a, b) => a.startsAt.localeCompare(b.startsAt)),
     [events, selectedDate],
   );
-  const renderItem = useCallback(({ item }: { item: CalendarEvent }) => <EventCard event={item} />, []);
+  const openEditor = useCallback((eventId?: string) => {
+    const target = eventId ? { pathname: '/event-editor', params: { id: eventId } } : '/event-editor';
+    router.push(target as Href);
+  }, [router]);
+  const renderItem = useCallback(({ item }: { item: CalendarEvent }) => <EventCard event={item} onPress={openEditor} />, [openEditor]);
 
   return (
     <AppScreen>
@@ -81,6 +88,7 @@ export default function CalendarScreen() {
         windowSize={5}
         showsVerticalScrollIndicator={false}
       />
+      <FloatingAddButton onPress={() => openEditor()} />
     </AppScreen>
   );
 }

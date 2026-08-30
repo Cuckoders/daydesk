@@ -16,7 +16,7 @@ interface RegisterBody {
 }
 
 export async function buildApp(config: ServerConfig) {
-  const app = Fastify({ logger: config.logger, bodyLimit: 256 * 1024 });
+  const app = Fastify({ logger: config.logger, bodyLimit: 1024 * 1024 });
   const database = createDatabase(config.databasePath);
 
   await app.register(helmet, { global: true });

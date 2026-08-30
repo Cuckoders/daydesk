@@ -43,6 +43,35 @@ function task(id: string, updatedAt: string) {
   };
 }
 
+function event(id: string, updatedAt: string) {
+  return {
+    id,
+    title: 'Встреча команды',
+    startsAt: '2026-09-01T10:00:00.000Z',
+    endsAt: '2026-09-01T11:00:00.000Z',
+    type: 'meeting',
+    location: 'Переговорная',
+    reminderEnabled: true,
+    remindBeforeMinutes: 10,
+    updatedAt,
+    syncVersion: 1,
+  };
+}
+
+function routine(id: string, updatedAt: string) {
+  return {
+    id,
+    title: 'Обед',
+    time: '13:00',
+    days: [1, 2, 3, 4, 5],
+    kind: 'meal',
+    remindBeforeMinutes: 10,
+    enabled: true,
+    updatedAt,
+    syncVersion: 1,
+  };
+}
+
 test('registration rejects an invalid setup code', async () => {
   const app = await buildApp(config);
   apps.push(app);
@@ -112,6 +141,37 @@ test('newer updates win and tombstones propagate', async () => {
   const changes = deletion.json().data.changes as { operation: string }[];
   assert.equal(changes.at(-1)?.operation, 'delete');
   assert.equal(changes.filter((change) => change.operation === 'delete').length, 1);
+});
+
+test('events and routines synchronize through the same authenticated stream', async () => {
+  const app = await buildApp(config);
+  apps.push(app);
+  const desktop = await register(app, 'Mac');
+  const mobile = await register(app, 'iPhone');
+  const updatedAt = '2026-08-30T16:00:00.000Z';
+  const changes = [
+    { id: randomUUID(), entity: 'event', entityId: 'event-team', operation: 'upsert', updatedAt, payload: event('event-team', updatedAt) },
+    { id: randomUUID(), entity: 'routine', entityId: 'routine-lunch', operation: 'upsert', updatedAt, payload: routine('routine-lunch', updatedAt) },
+  ];
+  const pushed = await app.inject({
+    method: 'POST', url: '/v1/sync', headers: { authorization: `Bearer ${desktop.token}`, 'x-device-id': desktop.id }, payload: { cursor: 0, changes },
+  });
+  assert.equal(pushed.statusCode, 200);
+  assert.equal(pushed.json().data.acceptedOperationIds.length, 2);
+
+  const pulled = await app.inject({
+    method: 'POST', url: '/v1/sync', headers: { authorization: `Bearer ${mobile.token}`, 'x-device-id': mobile.id }, payload: { cursor: 0, changes: [] },
+  });
+  assert.equal(pulled.statusCode, 200);
+  assert.deepEqual(pulled.json().data.changes.map((change: { entity: string }) => change.entity), ['event', 'routine']);
+
+  const invalidEvent = { ...event('event-invalid', updatedAt), endsAt: '2026-09-01T09:00:00.000Z' };
+  const rejected = await app.inject({
+    method: 'POST', url: '/v1/sync', headers: { authorization: `Bearer ${desktop.token}`, 'x-device-id': desktop.id },
+    payload: { cursor: 0, changes: [{ id: randomUUID(), entity: 'event', entityId: invalidEvent.id, operation: 'upsert', updatedAt, payload: invalidEvent }] },
+  });
+  assert.equal(rejected.statusCode, 400);
+  assert.deepEqual(rejected.json(), { status: 'error', message: 'Invalid request' });
 });
 
 test('revoking a device invalidates its token', async () => {
