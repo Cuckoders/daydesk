@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Ionicons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
 import { useLocalSearchParams, useRouter } from 'expo-router';
@@ -16,9 +16,10 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
+import { discardTransientTaskDraft, readTransientTaskDraft } from '@/src/services/editor-drafts';
 import { useDayDeskStore } from '@/src/store/useDayDeskStore';
 import { useAppColors } from '@/src/theme';
-import type { Priority, TaskRecurrenceMode } from '@/src/types';
+import type { NewTaskInput, Priority, TaskRecurrenceMode } from '@/src/types';
 
 const priorities: { value: Priority; label: string; color: string }[] = [
   { value: 'high', label: 'Высокий', color: '#D64545' },
@@ -46,24 +47,39 @@ function timeInput(value: Date) {
   return `${`${value.getHours()}`.padStart(2, '0')}:${`${value.getMinutes()}`.padStart(2, '0')}`;
 }
 
+function parseLocalDateTime(dateValue: string, timeValue: string) {
+  const dateMatch = /^(\d{4})-(\d{2})-(\d{2})$/.exec(dateValue);
+  const timeMatch = /^(\d{2}):(\d{2})$/.exec(timeValue);
+  if (!dateMatch || !timeMatch) return undefined;
+  const year = Number(dateMatch[1]); const month = Number(dateMatch[2]); const day = Number(dateMatch[3]);
+  const hour = Number(timeMatch[1]); const minute = Number(timeMatch[2]);
+  const value = new Date(year, month - 1, day, hour, minute, 0, 0);
+  if (year < 1970 || year > 2100 || value.getFullYear() !== year || value.getMonth() !== month - 1 || value.getDate() !== day
+    || value.getHours() !== hour || value.getMinutes() !== minute) return undefined;
+  return value;
+}
+
 export default function TaskEditorScreen() {
   const colors = useAppColors();
   const router = useRouter();
-  const params = useLocalSearchParams<{ id?: string }>();
+  const params = useLocalSearchParams<{ id?: string; draftId?: string }>();
   const task = useDayDeskStore((state) => state.tasks.find((item) => item.id === params.id));
+  const [draft] = useState(() => params.id ? undefined : readTransientTaskDraft(params.draftId));
   const addTask = useDayDeskStore((state) => state.addTask);
   const updateTask = useDayDeskStore((state) => state.updateTask);
   const deleteTask = useDayDeskStore((state) => state.deleteTask);
-  const initialDue = useMemo(() => task ? new Date(task.dueAt) : new Date(Date.now() + 60 * 60_000), [task]);
-  const [title, setTitle] = useState(task?.title ?? '');
+  const initialDue = useMemo(() => task ? new Date(task.dueAt) : draft ? new Date(draft.dueAt) : new Date(Date.now() + 60 * 60_000), [draft, task]);
+  const [title, setTitle] = useState(task?.title ?? draft?.title ?? '');
   const [date, setDate] = useState(dateInput(initialDue));
   const [time, setTime] = useState(timeInput(initialDue));
   const [priority, setPriority] = useState<Priority>(task?.priority ?? 'medium');
   const [category, setCategory] = useState(task?.category ?? 'Работа');
   const [reminderEnabled, setReminderEnabled] = useState(task?.reminderEnabled ?? true);
-  const [remindBeforeMinutes, setRemindBeforeMinutes] = useState(task?.remindBeforeMinutes ?? 10);
+  const [remindBeforeMinutes, setRemindBeforeMinutes] = useState(task?.remindBeforeMinutes ?? (draft ? 30 : 10));
   const [recurrence, setRecurrence] = useState<TaskRecurrenceMode>(task?.recurrence ?? 'none');
   const [saving, setSaving] = useState(false);
+
+  useEffect(() => { discardTransientTaskDraft(params.draftId); }, [params.draftId]);
 
   const save = async () => {
     const trimmed = title.trim();
@@ -71,17 +87,19 @@ export default function TaskEditorScreen() {
       Alert.alert('Добавьте название', 'Напишите, что нужно сделать.');
       return;
     }
-    const due = new Date(`${date}T${time}:00`);
-    if (Number.isNaN(due.getTime())) {
+    const due = parseLocalDateTime(date, time);
+    if (!due) {
       Alert.alert('Проверьте дату', 'Используйте формат ГГГГ-ММ-ДД и время ЧЧ:ММ.');
       return;
     }
     setSaving(true);
-    const input = { title: trimmed, dueAt: due.toISOString(), priority, category, reminderEnabled, remindBeforeMinutes, recurrence };
-    if (task) await updateTask(task.id, input);
-    else await addTask(input);
-    await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-    router.back();
+    const input: NewTaskInput = { title: trimmed, dueAt: due.toISOString(), priority, category, reminderEnabled, remindBeforeMinutes, recurrence };
+    try {
+      if (task) await updateTask(task.id, input);
+      else await addTask(input);
+      await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+      router.back();
+    } catch { setSaving(false); Alert.alert('Не удалось сохранить задачу', 'Проверьте данные и попробуйте ещё раз.'); }
   };
 
   const confirmDelete = () => {
@@ -110,10 +128,12 @@ export default function TaskEditorScreen() {
         </View>
 
         <ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false}>
+          {draft?.source === 'mail-message' ? <View style={[styles.importNotice, { backgroundColor: colors.primarySoft }]}><Ionicons name="mail-outline" size={21} color={colors.primary} /><Text style={[styles.importNoticeText, { color: colors.text }]}>Название взято из темы письма. Проверьте его и срок: в задачу попадёт только текст, который вы сохраните.</Text></View> : null}
           <Text style={[styles.label, { color: colors.text }]}>Что нужно сделать</Text>
           <TextInput
             accessibilityLabel="Название задачи"
-            autoFocus={!task}
+            autoFocus={!task && !draft}
+            maxLength={500}
             multiline
             onChangeText={setTitle}
             placeholder="Например, подготовить отчёт"
@@ -268,6 +288,8 @@ const styles = StyleSheet.create({
   navTitle: { fontSize: 17, fontWeight: '700' },
   done: { fontSize: 15, fontWeight: '700' },
   content: { padding: 16, paddingBottom: 38 },
+  importNotice: { minHeight: 68, borderRadius: 17, padding: 13, flexDirection: 'row', alignItems: 'flex-start', gap: 10 },
+  importNoticeText: { flex: 1, fontSize: 13, lineHeight: 19 },
   label: { marginTop: 18, marginBottom: 9, fontSize: 16, fontWeight: '700' },
   titleInput: { minHeight: 96, borderWidth: StyleSheet.hairlineWidth, borderRadius: 18, padding: 16, fontSize: 18, lineHeight: 25, textAlignVertical: 'top' },
   inputRow: { flexDirection: 'row', gap: 10 },

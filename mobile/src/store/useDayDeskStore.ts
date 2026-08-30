@@ -4,7 +4,7 @@ import { createJSONStorage, persist } from 'zustand/middleware';
 
 import { initialState } from '@/src/data';
 import { cancelReminder, cancelReminders, requestReminderPermission, scheduleEventReminder, scheduleRoutineReminders, scheduleTaskReminder } from '@/src/services/notifications';
-import type { CalendarEvent, DayDeskState, NewEventInput, NewRoutineInput, NewTaskInput, RemoteSyncChange, Routine, RoutineKind, SyncOperation, SyncStatus, Task } from '@/src/types';
+import type { CalendarEvent, DayDeskState, NewEventInput, NewRoutineInput, NewTaskInput, Priority, RemoteSyncChange, Routine, RoutineKind, SyncOperation, SyncStatus, Task, TaskRecurrenceMode } from '@/src/types';
 import { nextDueDate, nextDueDateForDays } from '@/src/utils/date';
 
 interface DayDeskActions {
@@ -36,6 +36,25 @@ const recurringTaskId = (seriesId: string, dueAt: string) => `repeat-${seriesId.
 const routineKinds = new Set<RoutineKind>(['water', 'meal', 'break', 'focus', 'custom']);
 const routineReminderOptions = new Set([0, 5, 10, 15, 30]);
 const controlCharacters = /[\u0000-\u001f\u007f]/;
+const taskPriorities = new Set<Priority>(['high', 'medium', 'low']);
+const taskRecurrences = new Set<TaskRecurrenceMode>(['none', 'daily', 'weekdays', 'weekly']);
+
+const normalizeTaskInput = (input: NewTaskInput): NewTaskInput => {
+  const title = input.title.replace(/[\u0000-\u001f\u007f]+/g, ' ').replace(/\s+/g, ' ').trim();
+  const category = input.category.replace(/[\u0000-\u001f\u007f]+/g, ' ').replace(/\s+/g, ' ').trim();
+  const dueAt = Date.parse(input.dueAt);
+  if (!title || title.length > 500) throw new Error('Проверьте название задачи.');
+  if (!category || category.length > 100) throw new Error('Проверьте категорию задачи.');
+  const dueDate = new Date(dueAt);
+  if (!Number.isFinite(dueAt) || dueDate.toISOString() !== input.dueAt || dueDate.getUTCFullYear() < 1970 || dueDate.getUTCFullYear() > 2100) {
+    throw new Error('Проверьте срок задачи.');
+  }
+  if (!taskPriorities.has(input.priority) || !taskRecurrences.has(input.recurrence)) throw new Error('Проверьте параметры задачи.');
+  if (!Number.isInteger(input.remindBeforeMinutes) || input.remindBeforeMinutes < 0 || input.remindBeforeMinutes > 10_080) {
+    throw new Error('Проверьте время напоминания.');
+  }
+  return { ...input, title, category };
+};
 
 const normalizeRoutineInput = (input: NewRoutineInput): NewRoutineInput => {
   const title = input.title.trim();
@@ -66,12 +85,13 @@ export const useDayDeskStore = create<DayDeskStore>()(
     (set, get) => ({
       ...initialState,
       addTask: async (input) => {
+        const normalized = normalizeTaskInput(input);
         const taskId = id('task');
         const task: Task = {
-          ...input,
+          ...normalized,
           id: taskId,
           completed: false,
-          desktopRecurrence: input.recurrence === 'none' ? undefined : { mode: input.recurrence, days: [], seriesId: taskId },
+          desktopRecurrence: normalized.recurrence === 'none' ? undefined : { mode: normalized.recurrence, days: [], seriesId: taskId },
           updatedAt: new Date().toISOString(),
           syncVersion: 1,
         };
@@ -83,17 +103,18 @@ export const useDayDeskStore = create<DayDeskStore>()(
         return task;
       },
       updateTask: async (taskId, input) => {
+        const normalized = normalizeTaskInput(input);
         const current = get().tasks.find((task) => task.id === taskId);
         if (!current) return;
         await cancelReminder(current.notificationId);
         const updated: Task = {
           ...current,
-          ...input,
-          desktopRecurrence: input.recurrence === 'none'
-            ? input.recurrence === current.recurrence ? current.desktopRecurrence : undefined
-            : input.recurrence === current.recurrence && current.desktopRecurrence
+          ...normalized,
+          desktopRecurrence: normalized.recurrence === 'none'
+            ? normalized.recurrence === current.recurrence ? current.desktopRecurrence : undefined
+            : normalized.recurrence === current.recurrence && current.desktopRecurrence
               ? current.desktopRecurrence
-              : { mode: input.recurrence, days: [], seriesId: current.desktopRecurrence?.seriesId ?? current.id },
+              : { mode: normalized.recurrence, days: [], seriesId: current.desktopRecurrence?.seriesId ?? current.id },
           updatedAt: new Date().toISOString(),
           syncVersion: current.syncVersion + 1,
           notificationId: undefined,

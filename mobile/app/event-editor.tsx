@@ -5,7 +5,7 @@ import { useLocalSearchParams, useRouter } from 'expo-router';
 import { Alert, KeyboardAvoidingView, Platform, Pressable, ScrollView, StyleSheet, Switch, Text, TextInput, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
-import { discardTransientEventDraft, readTransientEventDraft } from '@/src/services/event-draft';
+import { discardTransientEventDraft, readTransientEventDraft } from '@/src/services/editor-drafts';
 import { useDayDeskStore } from '@/src/store/useDayDeskStore';
 import { useAppColors } from '@/src/theme';
 import type { CalendarEventType, NewEventInput } from '@/src/types';
