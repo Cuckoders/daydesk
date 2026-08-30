@@ -69,6 +69,17 @@ export interface SyncOperation {
   createdAt: string;
 }
 
+export interface RemoteSyncChange {
+  sequence: number;
+  entity: 'task';
+  entityId: string;
+  operation: 'upsert' | 'delete';
+  updatedAt: string;
+  payload?: Omit<Task, 'notificationId'>;
+}
+
+export type SyncStatus = 'idle' | 'syncing' | 'offline' | 'error';
+
 export interface DayDeskState {
   tasks: Task[];
   events: CalendarEvent[];
@@ -76,6 +87,10 @@ export interface DayDeskState {
   accounts: MailAccount[];
   messages: MailMessage[];
   syncQueue: SyncOperation[];
+  syncCursor: number;
+  syncStatus: SyncStatus;
+  syncError?: string;
+  lastSyncedAt?: string;
   hydrated: boolean;
 }
 

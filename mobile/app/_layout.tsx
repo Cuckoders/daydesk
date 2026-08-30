@@ -5,6 +5,8 @@ import { StatusBar } from 'expo-status-bar';
 import { useColorScheme } from 'react-native';
 import 'react-native-reanimated';
 
+import { useAutoSync } from '@/src/hooks/useAutoSync';
+
 export { ErrorBoundary } from 'expo-router';
 
 export const unstable_settings = {
@@ -14,6 +16,7 @@ export const unstable_settings = {
 export default function RootLayout() {
   const scheme = useColorScheme();
   const router = useRouter();
+  useAutoSync();
 
   useEffect(() => {
     const openNotification = (response: Notifications.NotificationResponse) => {
@@ -36,6 +39,7 @@ export default function RootLayout() {
           name="task-editor"
           options={{ presentation: 'modal', title: 'Задача', headerShown: false, gestureEnabled: true }}
         />
+        <Stack.Screen name="sync-settings" options={{ presentation: 'modal', headerShown: false, gestureEnabled: true }} />
       </Stack>
     </ThemeProvider>
   );

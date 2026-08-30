@@ -73,4 +73,6 @@ export const initialState: DayDeskState = {
   accounts: [],
   messages: [],
   syncQueue: [],
+  syncCursor: 0,
+  syncStatus: 'idle',
 };

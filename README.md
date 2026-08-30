@@ -32,6 +32,7 @@ DayDesk для Windows, macOS, iOS и Android: задачи, встречи, п�
 - создание и отправка писем, ответы и исходящие вложения через Gmail API, Microsoft Graph или защищённый SMTP;
 - локальный SQLite-кэш писем с шифрованием AES-256-GCM;
 - хранение паролей и OAuth-токенов только в Keychain macOS или Credential Manager Windows.
+- отдельный защищённый sync-сервис в [`server/`](server/README.md): регистрация устройства, батч-синхронизация задач, разрешение конфликтов и tombstones удалений;
 
 ## Запуск
 

@@ -1,6 +1,6 @@
 import { useCallback, useMemo } from 'react';
 import { Ionicons } from '@expo/vector-icons';
-import { useRouter } from 'expo-router';
+import { type Href, useRouter } from 'expo-router';
 import { FlatList, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 
 import { AppScreen } from '@/components/AppScreen';
@@ -27,6 +27,7 @@ export default function TodayScreen() {
   const events = useDayDeskStore((state) => state.events);
   const routines = useDayDeskStore((state) => state.routines);
   const syncQueueLength = useDayDeskStore((state) => state.syncQueue.length);
+  const syncStatus = useDayDeskStore((state) => state.syncStatus);
   const toggleTask = useDayDeskStore((state) => state.toggleTask);
   const toggleRoutine = useDayDeskStore((state) => state.toggleRoutine);
   const enableAllRoutines = useDayDeskStore((state) => state.enableAllRoutines);
@@ -57,10 +58,20 @@ export default function TodayScreen() {
           <Text style={[styles.title, { color: colors.text }]}>Добрый день</Text>
           <Text style={[styles.date, { color: colors.textMuted }]}>{formatLongDate(new Date())}</Text>
         </View>
-        <View accessibilityLabel={`${syncQueueLength} изменений ожидают синхронизации`} style={[styles.syncBadge, { backgroundColor: colors.primarySoft }]}>
-          <Ionicons name="cloud-offline-outline" size={19} color={colors.primary} />
+        <Pressable
+          accessibilityLabel={`Настройки синхронизации. ${syncQueueLength} изменений ожидают отправки`}
+          accessibilityRole="button"
+          android_ripple={{ color: colors.border, borderless: true, radius: 26 }}
+          onPress={() => router.push('/sync-settings' as Href)}
+          style={({ pressed }) => [styles.syncBadge, { backgroundColor: colors.primarySoft }, pressed && styles.pressed]}
+        >
+          <Ionicons
+            name={syncStatus === 'syncing' ? 'sync' : syncStatus === 'error' ? 'cloud-offline-outline' : 'cloud-done-outline'}
+            size={19}
+            color={syncStatus === 'error' ? colors.danger : colors.primary}
+          />
           <Text style={[styles.syncText, { color: colors.primary }]}>{syncQueueLength}</Text>
-        </View>
+        </Pressable>
       </View>
 
       <View style={styles.statsRow}>
