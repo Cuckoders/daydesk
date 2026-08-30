@@ -23,8 +23,10 @@ import {
   MoreHorizontal,
   Paperclip,
   Plus,
+  Power,
   RefreshCw,
   Reply,
+  Rocket,
   Search,
   Server,
   Send,
@@ -39,8 +41,8 @@ import {
 } from "lucide-react";
 import { connectImap, disconnectImap, downloadImapAttachment, getImapMessageContent, syncImap, type RemoteMailMessage } from "./services/mail";
 import { clearMailAttachments, selectMailAttachments, sendMail, type SelectedMailAttachment } from "./services/compose";
+import { isAutostartEnabled, quitDayDesk, replaceBackgroundReminders, setAutostartEnabled } from "./services/desktop";
 import { loadMailCache, replaceMailCache, searchMailCache } from "./services/mailCache";
-import { notify } from "./services/notifications";
 import { connectOAuth, disconnectOAuth, downloadOAuthAttachment, getOAuthMessageContent, getOAuthProviderStatus, syncOAuth, type OAuthProvider, type OAuthProviderStatus } from "./services/oauth";
 import { loadState, saveState, stateChannel } from "./services/storage";
 import type { AppState, CalendarEvent, MailAccount, MailAttachment, MailMessage, Task } from "./types";
@@ -97,7 +99,7 @@ function Logo() {
   );
 }
 
-function Sidebar({ view, onChange, open, onClose, unreadCount }: { view: View; onChange: (view: View) => void; open: boolean; onClose: () => void; unreadCount: number }) {
+function Sidebar({ view, onChange, open, onClose, onSettings, unreadCount }: { view: View; onChange: (view: View) => void; open: boolean; onClose: () => void; onSettings: () => void; unreadCount: number }) {
   return (
     <aside className={`sidebar ${open ? "sidebar-open" : ""}`}>
       <div className="brand"><Logo /><span>DayDesk</span><button className="icon-button sidebar-close" onClick={onClose}><X size={19} /></button></div>
@@ -119,9 +121,54 @@ function Sidebar({ view, onChange, open, onClose, unreadCount }: { view: View; o
       </div>
       <div className="sidebar-bottom">
         <div className="mini-profile"><div className="avatar">О</div><div><strong>Олег</strong><span>Всё синхронизировано</span></div><MoreHorizontal size={18} /></div>
-        <button><Settings size={18} />Настройки</button>
+        <button onClick={onSettings}><Settings size={18} />Настройки</button>
       </div>
     </aside>
+  );
+}
+
+function SettingsModal({ onClose }: { onClose: () => void }) {
+  const [autostart, setAutostart] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [working, setWorking] = useState(false);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    let active = true;
+    void isAutostartEnabled()
+      .then((enabled) => { if (active) setAutostart(enabled); })
+      .catch((reason: unknown) => { if (active) setError(reason instanceof Error ? reason.message : "Не удалось проверить автозапуск"); })
+      .finally(() => { if (active) setLoading(false); });
+    return () => { active = false; };
+  }, []);
+
+  const toggleAutostart = async () => {
+    const next = !autostart;
+    setWorking(true);
+    setError("");
+    try {
+      await setAutostartEnabled(next);
+      setAutostart(next);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Не удалось изменить автозапуск");
+    } finally {
+      setWorking(false);
+    }
+  };
+
+  return (
+    <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
+      <section className="settings-modal" role="dialog" aria-modal="true" aria-labelledby="settings-title">
+        <header className="settings-header"><div><span className="eyebrow">ПОВЕДЕНИЕ ПРИЛОЖЕНИЯ</span><h2 id="settings-title">Настройки DayDesk</h2></div><button className="icon-button mail-reader-close" onClick={onClose} aria-label="Закрыть настройки"><X size={20} /></button></header>
+        <div className="settings-content">
+          <div className="setting-row"><div className="setting-icon"><Bell size={19} /></div><div><strong>Фоновые напоминания</strong><span>После закрытия окна DayDesk остаётся в трее и продолжает следить за встречами.</span></div><span className="setting-status">Включены</span></div>
+          <div className="setting-row"><div className="setting-icon"><Rocket size={19} /></div><div><strong>Запускать при входе в систему</strong><span>DayDesk запустится скрыто, чтобы напоминания работали сразу после входа в Windows или macOS.</span></div><button type="button" className={`setting-toggle ${autostart ? "active" : ""}`} role="switch" aria-checked={autostart} disabled={loading || working} onClick={() => void toggleAutostart()}><i /></button></div>
+          <div className="background-note"><ShieldCheck size={18} /><span>Полный выход доступен через меню иконки DayDesk в системном трее. Обычное закрытие окна безопасно сворачивает приложение в фон.</span></div>
+          {error ? <div className="form-error" role="alert">{error}</div> : null}
+        </div>
+        <footer className="settings-footer"><button className="danger-button" onClick={() => void quitDayDesk()}><Power size={16} />Выйти полностью</button><button className="primary-button" onClick={onClose}>Готово</button></footer>
+      </section>
+    </div>
   );
 }
 
@@ -888,10 +935,10 @@ export default function App() {
   const [adding, setAdding] = useState(false);
   const [eventEditor, setEventEditor] = useState<CalendarEvent | "new" | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [mailCacheReady, setMailCacheReady] = useState(false);
   const searchInput = useRef<HTMLInputElement>(null);
-  const notifiedEvents = useRef(new Set<string>());
   const mailSyncRunning = useRef(false);
   const mailAccountsKey = state.accounts
     .map((account) => [account.id, account.provider, account.authType, account.address, account.imapHost ?? "", account.imapPort ?? ""].join(":"))
@@ -901,6 +948,11 @@ export default function App() {
     saveState(state);
     stateChannel?.postMessage({ ...state, messages: [] });
   }, [state]);
+
+  useEffect(() => {
+    if (isWidget) return;
+    void replaceBackgroundReminders(state.events).catch(() => undefined);
+  }, [isWidget, state.events]);
 
   useEffect(() => {
     if (isWidget) return;
@@ -946,24 +998,6 @@ export default function App() {
     channel.addEventListener("message", receive);
     return () => channel.removeEventListener("message", receive);
   }, []);
-
-  useEffect(() => {
-    const check = () => {
-      const current = Date.now();
-      for (const event of state.events) {
-        if (event.remindBeforeMinutes <= 0) continue;
-        const until = new Date(event.startsAt).getTime() - current;
-        const notificationKey = `${event.id}:${event.startsAt}`;
-        if (until > 0 && until <= event.remindBeforeMinutes * 60_000 && !notifiedEvents.current.has(notificationKey)) {
-          notifiedEvents.current.add(notificationKey);
-          void notify(`Через ${Math.max(1, Math.round(until / 60_000))} мин: ${event.title}`, event.location ?? "DayDesk напомнит вовремя");
-        }
-      }
-    };
-    check();
-    const timer = window.setInterval(check, 60_000);
-    return () => window.clearInterval(timer);
-  }, [state.events]);
 
   useEffect(() => {
     if (isWidget || !mailAccountsKey) return;
@@ -1047,7 +1081,7 @@ export default function App() {
 
   return (
     <div className="app-shell">
-      <Sidebar view={view} onChange={setView} open={sidebarOpen} onClose={() => setSidebarOpen(false)} unreadCount={state.messages.filter((message) => message.unread).length} />
+      <Sidebar view={view} onChange={setView} open={sidebarOpen} onClose={() => setSidebarOpen(false)} onSettings={() => { setSettingsOpen(true); setSidebarOpen(false); }} unreadCount={state.messages.filter((message) => message.unread).length} />
       {sidebarOpen ? <button className="sidebar-scrim" onClick={() => setSidebarOpen(false)} aria-label="Закрыть меню" /> : null}
       <div className="app-content">
         <header className="topbar"><button className="icon-button menu-button" onClick={() => setSidebarOpen(true)}><Menu size={20} /></button><div className="search-box"><Search size={18} /><input ref={searchInput} value={searchQuery} aria-label="Поиск писем" maxLength={200} placeholder="Найти письмо…" onChange={(event) => { setSearchQuery(event.target.value); if (event.target.value.trim()) setView("mail"); }} />{searchQuery ? <button className="search-clear" onClick={() => setSearchQuery("")} aria-label="Очистить поиск"><X size={15} /></button> : <kbd>Ctrl K</kbd>}</div><div className="top-actions"><button className="icon-button notification-button"><Bell size={19} /><i /></button><button className="primary-button quick-add" onClick={() => setAdding(true)}><Plus size={18} />Добавить</button></div></header>
@@ -1055,6 +1089,7 @@ export default function App() {
       </div>
       {adding ? <AddTask onAdd={addTask} onClose={() => setAdding(false)} /> : null}
       {eventEditor ? <EventEditor existing={eventEditor === "new" ? undefined : eventEditor} onSave={saveEvent} onDelete={deleteEvent} onClose={() => setEventEditor(null)} /> : null}
+      {settingsOpen ? <SettingsModal onClose={() => setSettingsOpen(false)} /> : null}
     </div>
   );
 }
