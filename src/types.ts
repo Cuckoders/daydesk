@@ -1,5 +1,13 @@
 export type Priority = "high" | "medium" | "low";
 
+export type TaskRecurrenceMode = "daily" | "weekdays" | "weekly" | "custom";
+
+export interface TaskRecurrence {
+  mode: TaskRecurrenceMode;
+  days: number[];
+  seriesId: string;
+}
+
 export interface Task {
   id: string;
   title: string;
@@ -9,6 +17,8 @@ export interface Task {
   category: string;
   remindBeforeMinutes?: number;
   reminderEnabled?: boolean;
+  recurrence?: TaskRecurrence;
+  snoozedUntil?: string;
 }
 
 export interface CalendarEvent {

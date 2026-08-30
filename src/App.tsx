@@ -47,7 +47,7 @@ import { loadMailCache, replaceMailCache, searchMailCache } from "./services/mai
 import { connectOAuth, disconnectOAuth, downloadOAuthAttachment, getOAuthMessageContent, getOAuthProviderStatus, syncOAuth, type OAuthProvider, type OAuthProviderStatus } from "./services/oauth";
 import { deleteRemoteCalendarEvent, syncRemoteCalendar, toCalendarEvent, upsertRemoteCalendarEvent } from "./services/calendar";
 import { loadState, saveState, stateChannel } from "./services/storage";
-import type { AppState, CalendarEvent, MailAccount, MailAttachment, MailMessage, Routine, RoutineKind, Task } from "./types";
+import type { AppState, CalendarEvent, MailAccount, MailAttachment, MailMessage, Routine, RoutineKind, Task, TaskRecurrenceMode } from "./types";
 
 type View = "today" | "tasks" | "calendar" | "mail" | "widgets";
 
@@ -134,7 +134,10 @@ const routineOccurrences = (routines: Routine[], days = 32, from = new Date()): 
 };
 const taskReminderEvents = (tasks: Task[]): CalendarEvent[] => tasks.flatMap((task) => {
   const dueAt = new Date(task.dueAt);
-  const remindBeforeMinutes = task.remindBeforeMinutes ?? 0;
+  const snoozedUntil = task.snoozedUntil ? new Date(task.snoozedUntil) : null;
+  const usesSnooze = snoozedUntil !== null && !Number.isNaN(snoozedUntil.getTime()) && snoozedUntil > new Date();
+  const scheduledAt = usesSnooze ? snoozedUntil : dueAt;
+  const remindBeforeMinutes = usesSnooze ? 0 : task.remindBeforeMinutes ?? 0;
   if (
     task.completed
     || !task.reminderEnabled
@@ -149,10 +152,10 @@ const taskReminderEvents = (tasks: Task[]): CalendarEvent[] => tasks.flatMap((ta
   return [{
     id: `task:${task.id}`,
     title: task.title,
-    startsAt: dueAt.toISOString(),
-    endsAt: new Date(dueAt.getTime() + 15 * 60_000).toISOString(),
+    startsAt: scheduledAt.toISOString(),
+    endsAt: new Date(scheduledAt.getTime() + 15 * 60_000).toISOString(),
     type: "personal",
-    location: `Задача · ${task.category}`,
+    location: usesSnooze ? `Отложено на 10 минут · ${task.category}` : `Задача · ${task.category}`,
     remindBeforeMinutes,
     reminderEnabled: true,
   }];
@@ -165,6 +168,51 @@ const taskDateLabel = (iso: string) => {
   if (sameDay(date, tomorrow)) return "Завтра";
   return new Intl.DateTimeFormat("ru-RU", { day: "numeric", month: "short" }).format(date);
 };
+const taskRecurrenceLabel: Record<TaskRecurrenceMode, string> = {
+  daily: "Каждый день",
+  weekdays: "По будням",
+  weekly: "Каждую неделю",
+  custom: "По выбранным дням",
+};
+const nextRecurringDueAt = (task: Task, now = new Date()): string | null => {
+  if (!task.recurrence) return null;
+  const dueAt = new Date(task.dueAt);
+  if (Number.isNaN(dueAt.getTime())) return null;
+  const threshold = Math.max(dueAt.getTime(), now.getTime());
+  for (let offset = 1; offset <= 370; offset += 1) {
+    const candidate = new Date(dueAt);
+    candidate.setDate(dueAt.getDate() + offset);
+    const weekday = candidate.getDay();
+    const matches = task.recurrence.mode === "daily"
+      || (task.recurrence.mode === "weekdays" && weekday >= 1 && weekday <= 5)
+      || (task.recurrence.mode === "weekly" && offset % 7 === 0)
+      || (task.recurrence.mode === "custom" && task.recurrence.days.includes(weekday));
+    if (matches && candidate.getTime() > threshold) return candidate.toISOString();
+  }
+  return null;
+};
+const toggleTaskCompletion = (current: AppState, id: string): AppState => {
+  const task = current.tasks.find((item) => item.id === id);
+  if (!task) return current;
+  if (task.completed) {
+    return { ...current, tasks: current.tasks.map((item) => item.id === id ? { ...item, completed: false } : item) };
+  }
+  let tasks = current.tasks.map((item) => item.id === id ? { ...item, completed: true, snoozedUntil: undefined } : item);
+  const nextDueAt = nextRecurringDueAt(task);
+  if (task.recurrence && nextDueAt) {
+    const alreadyExists = tasks.some((item) => !item.completed && item.recurrence?.seriesId === task.recurrence?.seriesId);
+    if (!alreadyExists) {
+      tasks = [...tasks, { ...task, id: uid(), dueAt: nextDueAt, completed: false, snoozedUntil: undefined }];
+    }
+  }
+  return { ...current, tasks: tasks.sort((left, right) => left.dueAt.localeCompare(right.dueAt)) };
+};
+const snoozeTaskReminder = (current: AppState, id: string): AppState => ({
+  ...current,
+  tasks: current.tasks.map((task) => task.id === id && !task.completed && task.reminderEnabled
+    ? { ...task, snoozedUntil: new Date(Date.now() + 10 * 60_000).toISOString() }
+    : task),
+});
 const calendarRange = () => {
   const timeMin = new Date();
   timeMin.setDate(timeMin.getDate() - 30);
@@ -324,14 +372,23 @@ function MiniCalendar({ events, selectedDate = new Date(), onSelect }: { events:
   );
 }
 
-function TaskRow({ task, onToggle, onEdit }: { task: Task; onToggle: (id: string) => void; onEdit?: (task: Task) => void }) {
+function TaskRow({ task, onToggle, onEdit, onSnooze }: { task: Task; onToggle: (id: string) => void; onEdit?: (task: Task) => void; onSnooze?: (task: Task) => void }) {
+  const now = Date.now();
+  const dueAt = new Date(task.dueAt).getTime();
+  const snoozed = task.snoozedUntil && new Date(task.snoozedUntil).getTime() > now;
+  const canSnooze = task.reminderEnabled
+    && !task.completed
+    && !snoozed
+    && now >= dueAt - (task.remindBeforeMinutes ?? 0) * 60_000
+    && now < dueAt + 24 * 60 * 60_000;
   return (
     <div className={`task-row ${task.completed ? "completed" : ""}`}>
       <button className="task-check" onClick={() => onToggle(task.id)} aria-label={task.completed ? "Вернуть задачу" : "Завершить задачу"}>
         {task.completed ? <Check size={14} /> : <Circle size={18} />}
       </button>
-      <div className="task-copy"><strong>{task.title}</strong><span><Clock3 size={13} />{taskDateLabel(task.dueAt)}, {shortTime(task.dueAt)} · {task.category}{task.reminderEnabled ? <Bell size={11} /> : null}</span></div>
+      <div className="task-copy"><strong>{task.title}</strong><span><Clock3 size={13} />{taskDateLabel(task.dueAt)}, {shortTime(task.dueAt)} · {task.category}{task.recurrence ? ` · ${taskRecurrenceLabel[task.recurrence.mode]}` : ""}{snoozed ? ` · отложено до ${shortTime(task.snoozedUntil!)}` : ""}{task.reminderEnabled ? <Bell size={11} /> : null}</span></div>
       <span className={`priority ${task.priority}`} />
+      {onSnooze && canSnooze ? <button className="task-snooze" onClick={() => onSnooze(task)} title="Отложить напоминание на 10 минут"><Bell size={13} /><span>10</span></button> : null}
       {onEdit ? <button className="icon-button task-edit" onClick={() => onEdit(task)} aria-label={`Изменить задачу «${task.title}»`}><MoreHorizontal size={18} /></button> : null}
     </div>
   );
@@ -586,19 +643,38 @@ function TaskEditor({ existing, onSave, onDelete, onClose }: { existing?: Task; 
   const [category, setCategory] = useState(existing?.category ?? "Личное");
   const [reminderEnabled, setReminderEnabled] = useState(existing?.reminderEnabled ?? true);
   const [remindBeforeMinutes, setRemindBeforeMinutes] = useState(existing?.remindBeforeMinutes ?? 10);
+  const [recurrenceMode, setRecurrenceMode] = useState<"none" | TaskRecurrenceMode>(existing?.recurrence?.mode ?? "none");
+  const [recurrenceDays, setRecurrenceDays] = useState(existing?.recurrence?.days ?? [1, 2, 3, 4, 5]);
+  const [error, setError] = useState("");
+  const [taskId] = useState(() => existing?.id ?? uid());
   const submit = (event: FormEvent) => {
     event.preventDefault();
     if (!title.trim()) return;
+    if (recurrenceMode === "custom" && recurrenceDays.length === 0) {
+      setError("Выберите хотя бы один день повтора");
+      return;
+    }
+    const dueAt = combineDateTime(date, time);
     onSave({
-      id: existing?.id ?? uid(),
+      id: taskId,
       title: title.trim(),
       completed: existing?.completed ?? false,
-      dueAt: combineDateTime(date, time),
+      dueAt,
       priority,
       category: category.trim() || "Личное",
       remindBeforeMinutes: reminderEnabled ? remindBeforeMinutes : 0,
       reminderEnabled,
+      recurrence: recurrenceMode === "none" ? undefined : {
+        mode: recurrenceMode,
+        days: recurrenceMode === "custom" ? routineWeekdays.map((day) => day.value).filter((day) => recurrenceDays.includes(day)) : [],
+        seriesId: existing?.recurrence?.seriesId ?? taskId,
+      },
+      snoozedUntil: existing && dueAt === existing.dueAt ? existing.snoozedUntil : undefined,
     });
+  };
+  const toggleRecurrenceDay = (day: number) => {
+    setRecurrenceDays((current) => current.includes(day) ? current.filter((item) => item !== day) : [...current, day]);
+    setError("");
   };
   return (
     <div className="modal-backdrop" onMouseDown={onClose}>
@@ -613,7 +689,10 @@ function TaskEditor({ existing, onSave, onDelete, onClose }: { existing?: Task; 
           <label>Приоритет<select value={priority} onChange={(event) => setPriority(event.target.value as Task["priority"])}><option value="high">Высокий</option><option value="medium">Средний</option><option value="low">Низкий</option></select></label>
           <label>Категория<input maxLength={50} value={category} onChange={(event) => setCategory(event.target.value)} placeholder="Личное" /></label>
           <label className="field-full">Напомнить<select value={reminderEnabled ? String(remindBeforeMinutes) : "none"} onChange={(event) => { const value = event.target.value; setReminderEnabled(value !== "none"); if (value !== "none") setRemindBeforeMinutes(Number(value)); }}><option value="none">Не напоминать</option><option value="0">В срок задачи</option><option value="5">За 5 минут</option><option value="10">За 10 минут</option><option value="30">За 30 минут</option><option value="60">За 1 час</option><option value="1440">За 1 день</option></select></label>
+          <label className="field-full">Повторять<select value={recurrenceMode} onChange={(event) => { setRecurrenceMode(event.target.value as "none" | TaskRecurrenceMode); setError(""); }}><option value="none">Не повторять</option><option value="daily">Каждый день</option><option value="weekdays">По будням</option><option value="weekly">Каждую неделю</option><option value="custom">В выбранные дни</option></select></label>
+          {recurrenceMode === "custom" ? <fieldset className="routine-days task-recurrence-days"><legend>Дни повтора</legend><div>{routineWeekdays.map((day) => <button key={day.value} type="button" className={recurrenceDays.includes(day.value) ? "active" : ""} aria-pressed={recurrenceDays.includes(day.value)} onClick={() => toggleRecurrenceDay(day.value)}>{day.short}</button>)}</div></fieldset> : null}
         </div>
+        {error ? <div className="form-error" role="alert">{error}</div> : null}
         <div className="modal-actions event-actions">{existing ? <button type="button" className="danger-button" onClick={() => onDelete(existing)}><Trash2 size={16} />Удалить</button> : null}<span /><button type="button" className="secondary-button" onClick={onClose}>Отмена</button><button className="primary-button"><Check size={17} />Сохранить</button></div>
       </form>
     </div>
@@ -725,7 +804,8 @@ function TodayView({ state, setState, onAddTask, onEditTask, onAddEvent, onEditE
   const completed = todayTasks.filter((task) => task.completed).length;
   const progress = todayTasks.length ? Math.round((completed / todayTasks.length) * 100) : 0;
   const todayEvents = [...state.events, ...routineOccurrences(state.routines ?? [], 1, now)].filter((event) => eventOccursOnDate(event, now)).sort((left, right) => left.startsAt.localeCompare(right.startsAt));
-  const toggleTask = (id: string) => setState((current) => ({ ...current, tasks: current.tasks.map((task) => task.id === id ? { ...task, completed: !task.completed } : task) }));
+  const toggleTask = (id: string) => setState((current) => toggleTaskCompletion(current, id));
+  const snoozeTask = (task: Task) => setState((current) => snoozeTaskReminder(current, task.id));
   return (
     <>
       <div className="welcome-row"><div><p>{longDate(now)}</p><h1>{greeting}, Олег <span>👋</span></h1><span>Спокойный день начинается с ясного плана.</span></div><div className="weather"><div>☀️</div><strong>+18°</strong><span>Москва</span></div></div>
@@ -733,7 +813,7 @@ function TodayView({ state, setState, onAddTask, onEditTask, onAddEvent, onEditE
       <div className="dashboard-grid">
         <section className="card tasks-card">
           <div className="card-head"><div><span className="eyebrow"><CheckCircle2 size={15} />ЗАДАЧИ</span><h2>На сегодня <span>{todayTasks.filter((task) => !task.completed).length}</span></h2></div><div className="progress-ring" style={{ "--progress": `${progress * 3.6}deg` } as React.CSSProperties}><span>{progress}%</span></div></div>
-          <div className="task-list">{todayTasks.length ? todayTasks.map((task) => <TaskRow key={task.id} task={task} onToggle={toggleTask} onEdit={onEditTask} />) : <div className="empty-state">На сегодня задач нет</div>}</div>
+          <div className="task-list">{todayTasks.length ? todayTasks.map((task) => <TaskRow key={task.id} task={task} onToggle={toggleTask} onEdit={onEditTask} onSnooze={snoozeTask} />) : <div className="empty-state">На сегодня задач нет</div>}</div>
           <button className="add-row" onClick={onAddTask}><Plus size={17} />Добавить задачу</button>
         </section>
         <section className="card schedule-card">
@@ -748,9 +828,10 @@ function TodayView({ state, setState, onAddTask, onEditTask, onAddEvent, onEditE
 }
 
 function TasksView({ state, setState, onAdd, onEdit }: { state: AppState; setState: React.Dispatch<React.SetStateAction<AppState>>; onAdd: () => void; onEdit: (task: Task) => void }) {
-  const toggle = (id: string) => setState((current) => ({ ...current, tasks: current.tasks.map((task) => task.id === id ? { ...task, completed: !task.completed } : task) }));
+  const toggle = (id: string) => setState((current) => toggleTaskCompletion(current, id));
+  const snooze = (task: Task) => setState((current) => snoozeTaskReminder(current, task.id));
   const tasks = [...state.tasks].sort((left, right) => left.completed === right.completed ? left.dueAt.localeCompare(right.dueAt) : Number(left.completed) - Number(right.completed));
-  return <section className="page-section"><div className="page-title"><div><span className="eyebrow">МОЙ ДЕНЬ</span><h1>Задачи</h1><p>Соберите всё важное в одном спокойном списке.</p></div><button className="primary-button" onClick={onAdd}><Plus size={17} />Новая задача</button></div><div className="card large-list">{tasks.map((task) => <TaskRow key={task.id} task={task} onToggle={toggle} onEdit={onEdit} />)}<button className="add-row" onClick={onAdd}><Plus size={17} />Добавить задачу</button></div></section>;
+  return <section className="page-section"><div className="page-title"><div><span className="eyebrow">МОЙ ДЕНЬ</span><h1>Задачи</h1><p>Соберите всё важное в одном спокойном списке.</p></div><button className="primary-button" onClick={onAdd}><Plus size={17} />Новая задача</button></div><div className="card large-list">{tasks.map((task) => <TaskRow key={task.id} task={task} onToggle={toggle} onEdit={onEdit} onSnooze={snooze} />)}<button className="add-row" onClick={onAdd}><Plus size={17} />Добавить задачу</button></div></section>;
 }
 
 function CalendarView({ state, setState, onAdd, onEdit }: { state: AppState; setState: React.Dispatch<React.SetStateAction<AppState>>; onAdd: () => void; onEdit: (event: CalendarEvent) => void }) {

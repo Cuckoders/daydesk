@@ -1,5 +1,5 @@
 import { initialState } from "../data";
-import type { AppState, Routine, RoutineKind, Task } from "../types";
+import type { AppState, Routine, RoutineKind, Task, TaskRecurrenceMode } from "../types";
 
 const STORAGE_KEY = "daydesk:state:v1";
 const MAX_PERSISTED_STATE_BYTES = 4 * 1024 * 1024;
@@ -8,6 +8,20 @@ const serializeState = (state: AppState) => JSON.stringify({ ...state, messages:
 const byteLength = (value: string) => new TextEncoder().encode(value).byteLength;
 const routineKinds = new Set<RoutineKind>(["water", "meal", "break", "focus", "custom"]);
 const taskPriorities = new Set<Task["priority"]>(["high", "medium", "low"]);
+const taskRecurrenceModes = new Set<TaskRecurrenceMode>(["daily", "weekdays", "weekly", "custom"]);
+
+function sanitizeTaskRecurrence(value: unknown): Task["recurrence"] {
+  if (!value || typeof value !== "object") return undefined;
+  const raw = value as NonNullable<Task["recurrence"]>;
+  const seriesId = typeof raw.seriesId === "string" ? raw.seriesId.trim() : "";
+  const mode = raw.mode;
+  const days = Array.isArray(raw.days)
+    ? [...new Set(raw.days.filter((day): day is number => Number.isInteger(day) && day >= 0 && day <= 6))]
+    : [];
+  if (!taskRecurrenceModes.has(mode) || !seriesId || seriesId.length > 100 || /[\u0000-\u001f\u007f]/.test(seriesId)) return undefined;
+  if (mode === "custom" && days.length === 0) return undefined;
+  return { mode, seriesId, days: mode === "custom" ? days : [] };
+}
 
 function sanitizeTasks(value: unknown): Task[] {
   if (!Array.isArray(value)) return initialState.tasks;
@@ -22,6 +36,7 @@ function sanitizeTasks(value: unknown): Task[] {
     if (/[\u0000-\u001f\u007f]/.test(`${id}${title}${category}`) || !taskPriorities.has(raw.priority as Task["priority"])) return [];
     const reminderMinutes = typeof raw.remindBeforeMinutes === "number" ? raw.remindBeforeMinutes : 0;
     const reminderIsValid = Number.isInteger(reminderMinutes) && reminderMinutes >= 0 && reminderMinutes <= 7 * 24 * 60;
+    const snoozedUntil = typeof raw.snoozedUntil === "string" ? new Date(raw.snoozedUntil) : null;
     return [{
       id,
       title,
@@ -31,6 +46,8 @@ function sanitizeTasks(value: unknown): Task[] {
       category,
       remindBeforeMinutes: reminderIsValid ? reminderMinutes : 0,
       reminderEnabled: raw.reminderEnabled === true && reminderIsValid,
+      recurrence: sanitizeTaskRecurrence(raw.recurrence),
+      snoozedUntil: snoozedUntil && !Number.isNaN(snoozedUntil.getTime()) ? snoozedUntil.toISOString() : undefined,
     }];
   });
 }
