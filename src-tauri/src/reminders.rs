@@ -50,8 +50,8 @@ fn validate_text(value: &str, field: &str, max_chars: usize) -> Result<String, S
     if trimmed.is_empty() {
         return Err(format!("Поле «{field}» не может быть пустым"));
     }
-    if trimmed.chars().count() > max_chars {
-        return Err(format!("Поле «{field}» слишком длинное"));
+    if trimmed.chars().count() > max_chars || trimmed.chars().any(char::is_control) {
+        return Err(format!("Поле «{field}» содержит недопустимое значение"));
     }
     Ok(trimmed.to_string())
 }
@@ -68,8 +68,8 @@ fn normalize_reminders(events: Vec<ReminderInput>) -> Result<Vec<ScheduledRemind
     events
         .into_iter()
         .map(|event| {
-            if event.remind_before_minutes > MAX_REMINDER_MINUTES {
-                return Err("Интервал напоминания не может превышать семь дней".into());
+            if !(0..=MAX_REMINDER_MINUTES).contains(&event.remind_before_minutes) {
+                return Err("Интервал напоминания должен быть от 0 минут до семи дней".into());
             }
 
             let id = validate_text(&event.id, "ID события", 200)?;
@@ -240,7 +240,17 @@ mod tests {
         assert!(normalize_reminders(vec![input("not-a-date", 10)]).is_err());
         assert!(normalize_reminders(vec![input("2026-08-30T12:00:00Z", 10_081)]).is_err());
         assert!(normalize_reminders(vec![ReminderInput {
+            reminder_enabled: true,
+            ..input("2026-08-30T12:00:00Z", -1)
+        }])
+        .is_err());
+        assert!(normalize_reminders(vec![ReminderInput {
             title: "   ".into(),
+            ..input("2026-08-30T12:00:00Z", 10)
+        }])
+        .is_err());
+        assert!(normalize_reminders(vec![ReminderInput {
+            title: "Обед\nсейчас".into(),
             ..input("2026-08-30T12:00:00Z", 10)
         }])
         .is_err());

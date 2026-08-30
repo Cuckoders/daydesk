@@ -17,6 +17,8 @@ export interface CalendarEvent {
   type: "meeting" | "meal" | "focus" | "personal";
   location?: string;
   remindBeforeMinutes: number;
+  reminderEnabled?: boolean;
+  routineId?: string;
   allDay?: boolean;
   allDayStartDate?: string;
   allDayEndDate?: string;
@@ -34,6 +36,18 @@ export interface CalendarEvent {
     updateLocation?: boolean;
     operationId?: string;
   };
+}
+
+export type RoutineKind = "water" | "meal" | "break" | "focus" | "custom";
+
+export interface Routine {
+  id: string;
+  title: string;
+  time: string;
+  days: number[];
+  kind: RoutineKind;
+  remindBeforeMinutes: number;
+  enabled: boolean;
 }
 
 export interface MailAccount {
@@ -80,6 +94,7 @@ export interface MailAttachment {
 export interface AppState {
   tasks: Task[];
   events: CalendarEvent[];
+  routines: Routine[];
   accounts: MailAccount[];
   messages: MailMessage[];
 }

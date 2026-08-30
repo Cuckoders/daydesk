@@ -1,11 +1,41 @@
 import { initialState } from "../data";
-import type { AppState } from "../types";
+import type { AppState, Routine, RoutineKind } from "../types";
 
 const STORAGE_KEY = "daydesk:state:v1";
 const MAX_PERSISTED_STATE_BYTES = 4 * 1024 * 1024;
 
 const serializeState = (state: AppState) => JSON.stringify({ ...state, messages: [] });
 const byteLength = (value: string) => new TextEncoder().encode(value).byteLength;
+const routineKinds = new Set<RoutineKind>(["water", "meal", "break", "focus", "custom"]);
+
+function sanitizeRoutines(value: unknown): Routine[] {
+  if (!Array.isArray(value)) return initialState.routines;
+  return value.slice(0, 64).flatMap((candidate) => {
+    if (!candidate || typeof candidate !== "object") return [];
+    const raw = candidate as Partial<Routine>;
+    const id = typeof raw.id === "string" ? raw.id.trim() : "";
+    const title = typeof raw.title === "string" ? raw.title.trim() : "";
+    const time = typeof raw.time === "string" ? raw.time : "";
+    const match = /^(\d{2}):(\d{2})$/.exec(time);
+    const days = Array.isArray(raw.days)
+      ? [...new Set(raw.days.filter((day): day is number => Number.isInteger(day) && day >= 0 && day <= 6))]
+      : [];
+    if (!id || id.length > 100 || /[\u0000-\u001f\u007f]/.test(id) || !title || title.length > 100 || /[\u0000-\u001f\u007f]/.test(title) || !match || days.length === 0) return [];
+    if (Number(match[1]) > 23 || Number(match[2]) > 59 || !routineKinds.has(raw.kind as RoutineKind)) return [];
+    const remindBeforeMinutes = [0, 5, 10, 15, 30].includes(raw.remindBeforeMinutes ?? -1)
+      ? raw.remindBeforeMinutes as number
+      : 0;
+    return [{
+      id,
+      title,
+      time,
+      days,
+      kind: raw.kind as RoutineKind,
+      remindBeforeMinutes,
+      enabled: raw.enabled !== false,
+    }];
+  });
+}
 
 export function loadState(): AppState {
   try {
@@ -28,6 +58,7 @@ export function loadState(): AppState {
         ...event,
         remindBeforeMinutes: event.remindBeforeMinutes ?? 10,
       })).filter((event) => !event.calendar || accountIds.has(event.calendar.accountId)),
+      routines: sanitizeRoutines(stored.routines),
       accounts,
       messages: (stored.messages ?? []).filter((message) => accountIds.has(message.accountId)),
     };

@@ -18,7 +18,7 @@ export async function replaceBackgroundReminders(events: CalendarEvent[]): Promi
       startsAt: event.startsAt,
       location: event.location,
       remindBeforeMinutes: event.remindBeforeMinutes,
-      reminderEnabled: event.calendar?.reminderEnabled ?? event.remindBeforeMinutes > 0,
+      reminderEnabled: event.reminderEnabled ?? event.calendar?.reminderEnabled ?? event.remindBeforeMinutes > 0,
     })),
   });
 }

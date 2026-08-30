@@ -9,6 +9,7 @@ import {
   Circle,
   Clock3,
   Coffee,
+  Droplets,
   Download,
   FilePlus2,
   Inbox,
@@ -46,7 +47,7 @@ import { loadMailCache, replaceMailCache, searchMailCache } from "./services/mai
 import { connectOAuth, disconnectOAuth, downloadOAuthAttachment, getOAuthMessageContent, getOAuthProviderStatus, syncOAuth, type OAuthProvider, type OAuthProviderStatus } from "./services/oauth";
 import { deleteRemoteCalendarEvent, syncRemoteCalendar, toCalendarEvent, upsertRemoteCalendarEvent } from "./services/calendar";
 import { loadState, saveState, stateChannel } from "./services/storage";
-import type { AppState, CalendarEvent, MailAccount, MailAttachment, MailMessage, Task } from "./types";
+import type { AppState, CalendarEvent, MailAccount, MailAttachment, MailMessage, Routine, RoutineKind, Task } from "./types";
 
 type View = "today" | "tasks" | "calendar" | "mail" | "widgets";
 
@@ -83,6 +84,53 @@ const inputTime = (iso: string) => {
   return `${pad(date.getHours())}:${pad(date.getMinutes())}`;
 };
 const combineDateTime = (date: string, time: string) => new Date(`${date}T${time}:00`).toISOString();
+const routineKindLabel: Record<RoutineKind, string> = {
+  water: "Вода",
+  meal: "Питание",
+  break: "Перерыв",
+  focus: "Фокус",
+  custom: "Другое",
+};
+const routineWeekdays = [
+  { value: 1, short: "Пн" },
+  { value: 2, short: "Вт" },
+  { value: 3, short: "Ср" },
+  { value: 4, short: "Чт" },
+  { value: 5, short: "Пт" },
+  { value: 6, short: "Сб" },
+  { value: 0, short: "Вс" },
+];
+const routineDaysLabel = (days: number[]) => {
+  if (days.length === 7) return "Каждый день";
+  if ([1, 2, 3, 4, 5].every((day) => days.includes(day)) && days.length === 5) return "По будням";
+  if ([0, 6].every((day) => days.includes(day)) && days.length === 2) return "По выходным";
+  return routineWeekdays.filter((day) => days.includes(day.value)).map((day) => day.short).join(", ");
+};
+const routineEventType = (kind: RoutineKind): CalendarEvent["type"] => kind === "meal" ? "meal" : kind === "focus" ? "focus" : "personal";
+const routineOccurrences = (routines: Routine[], days = 32, from = new Date()): CalendarEvent[] => {
+  const occurrences: CalendarEvent[] = [];
+  for (let offset = 0; offset < days; offset += 1) {
+    const date = new Date(from.getFullYear(), from.getMonth(), from.getDate() + offset);
+    for (const routine of routines) {
+      if (!routine.enabled || !routine.days.includes(date.getDay())) continue;
+      const [hours, minutes] = routine.time.split(":").map(Number);
+      const startsAt = new Date(date.getFullYear(), date.getMonth(), date.getDate(), hours, minutes, 0, 0);
+      const endsAt = new Date(startsAt.getTime() + 15 * 60_000);
+      occurrences.push({
+        id: `routine:${routine.id}:${localDateKey(date)}`,
+        title: routine.title,
+        startsAt: startsAt.toISOString(),
+        endsAt: endsAt.toISOString(),
+        type: routineEventType(routine.kind),
+        location: "Ритм дня",
+        remindBeforeMinutes: routine.remindBeforeMinutes,
+        reminderEnabled: true,
+        routineId: routine.id,
+      });
+    }
+  }
+  return occurrences.sort((left, right) => left.startsAt.localeCompare(right.startsAt));
+};
 const calendarRange = () => {
   const timeMin = new Date();
   timeMin.setDate(timeMin.getDate() - 30);
@@ -600,7 +648,7 @@ function TodayView({ state, setState, onAddTask, onAddEvent, onEditEvent }: { st
   const greeting = now.getHours() < 12 ? "Доброе утро" : now.getHours() < 18 ? "Добрый день" : "Добрый вечер";
   const completed = state.tasks.filter((task) => task.completed).length;
   const progress = state.tasks.length ? Math.round((completed / state.tasks.length) * 100) : 0;
-  const todayEvents = state.events.filter((event) => eventOccursOnDate(event, now)).sort((left, right) => left.startsAt.localeCompare(right.startsAt));
+  const todayEvents = [...state.events, ...routineOccurrences(state.routines ?? [], 1, now)].filter((event) => eventOccursOnDate(event, now)).sort((left, right) => left.startsAt.localeCompare(right.startsAt));
   const toggleTask = (id: string) => setState((current) => ({ ...current, tasks: current.tasks.map((task) => task.id === id ? { ...task, completed: !task.completed } : task) }));
   return (
     <>
@@ -614,7 +662,7 @@ function TodayView({ state, setState, onAddTask, onAddEvent, onEditEvent }: { st
         </section>
         <section className="card schedule-card">
           <div className="card-head"><div><span className="eyebrow"><CalendarDays size={15} />РАСПИСАНИЕ</span><h2>Ближайшее</h2></div><button className="date-chip">Сегодня <ChevronDown size={14} /></button></div>
-          <div className="event-list">{todayEvents.length ? todayEvents.slice(0, 4).map((event) => <EventRow key={event.id} event={event} onEdit={onEditEvent} />) : <div className="empty-state">На сегодня событий нет</div>}</div>
+          <div className="event-list">{todayEvents.length ? todayEvents.slice(0, 4).map((event) => <EventRow key={event.id} event={event} onEdit={event.routineId ? undefined : onEditEvent} />) : <div className="empty-state">На сегодня событий нет</div>}</div>
           <button className="add-row" onClick={onAddEvent}><Plus size={17} />Добавить событие</button>
         </section>
       </div>
@@ -634,7 +682,7 @@ function CalendarView({ state, setState, onAdd, onEdit }: { state: AppState; set
   const [status, setStatus] = useState("");
   const [error, setError] = useState("");
   const calendarAccounts = state.accounts.filter(isCalendarAccount);
-  const selectedEvents = useMemo(() => state.events.filter((event) => eventOccursOnDate(event, selectedDate)).sort((left, right) => left.startsAt.localeCompare(right.startsAt)), [state.events, selectedDate]);
+  const selectedEvents = useMemo(() => [...state.events, ...routineOccurrences(state.routines ?? [], 1, selectedDate)].filter((event) => eventOccursOnDate(event, selectedDate)).sort((left, right) => left.startsAt.localeCompare(right.startsAt)), [state.events, state.routines, selectedDate]);
 
   const synchronize = async (account: MailAccount & { provider: OAuthProvider }, enable = false) => {
     const startedAtMutation = calendarMutationVersion;
@@ -691,7 +739,7 @@ function CalendarView({ state, setState, onAdd, onEdit }: { state: AppState; set
     {status ? <div className="mail-action-status calendar-sync-message" role="status"><CheckCircle2 size={16} />{status}</div> : null}
     <MiniCalendar events={state.events} selectedDate={selectedDate} onSelect={setSelectedDate} />
     <div className="calendar-date-title"><strong>{longDate(selectedDate)}</strong><span>{selectedEvents.length} {selectedEvents.length === 1 ? "событие" : selectedEvents.length > 1 && selectedEvents.length < 5 ? "события" : "событий"}</span></div>
-    <div className="card calendar-list">{selectedEvents.length ? selectedEvents.map((event) => <EventRow key={event.id} event={event} onEdit={onEdit} />) : <div className="empty-state large">Свободный день — можно запланировать отдых или фокус-время.</div>}</div>
+    <div className="card calendar-list">{selectedEvents.length ? selectedEvents.map((event) => <EventRow key={event.id} event={event} onEdit={event.routineId ? undefined : onEdit} />) : <div className="empty-state large">Свободный день — можно запланировать отдых или фокус-время.</div>}</div>
   </section>;
 }
 
@@ -1052,29 +1100,116 @@ function MailView({ state, setState, searchQuery }: { state: AppState; setState:
   );
 }
 
-async function openWidget() {
+function RoutineIcon({ kind, size = 18 }: { kind: RoutineKind; size?: number }) {
+  if (kind === "water") return <Droplets size={size} />;
+  if (kind === "meal") return <Utensils size={size} />;
+  if (kind === "break") return <Coffee size={size} />;
+  if (kind === "focus") return <Sparkles size={size} />;
+  return <Bell size={size} />;
+}
+
+function RoutineEditor({ existing, onSave, onDelete, onClose }: { existing?: Routine; onSave: (routine: Routine) => void; onDelete: (routine: Routine) => void; onClose: () => void }) {
+  const [title, setTitle] = useState(existing?.title ?? "");
+  const [time, setTime] = useState(existing?.time ?? "13:00");
+  const [kind, setKind] = useState<RoutineKind>(existing?.kind ?? "custom");
+  const [days, setDays] = useState(existing?.days ?? [1, 2, 3, 4, 5]);
+  const [remindBeforeMinutes, setRemindBeforeMinutes] = useState(existing?.remindBeforeMinutes ?? 0);
+  const [error, setError] = useState("");
+
+  const submit = (event: FormEvent) => {
+    event.preventDefault();
+    if (!title.trim()) return;
+    if (days.length === 0) {
+      setError("Выберите хотя бы один день недели");
+      return;
+    }
+    onSave({
+      id: existing?.id ?? uid(),
+      title: title.trim(),
+      time,
+      kind,
+      days: routineWeekdays.map((day) => day.value).filter((day) => days.includes(day)),
+      remindBeforeMinutes,
+      enabled: existing?.enabled ?? true,
+    });
+  };
+
+  const toggleDay = (day: number) => {
+    setDays((current) => current.includes(day) ? current.filter((item) => item !== day) : [...current, day]);
+    setError("");
+  };
+
+  return <div className="modal-backdrop" onMouseDown={onClose}>
+    <form className="quick-modal routine-modal" onSubmit={submit} onMouseDown={(event) => event.stopPropagation()}>
+      <div className="modal-icon"><RoutineIcon kind={kind} size={21} /></div>
+      <div><span className="eyebrow">РИТМ ДНЯ</span><h2>{existing ? "Изменить напоминание" : "Новое напоминание"}</h2></div>
+      <button type="button" className="icon-button modal-close" onClick={onClose} aria-label="Закрыть"><X size={20} /></button>
+      <div className="form-grid">
+        <label className="field-full">Название<input autoFocus maxLength={100} value={title} onChange={(event) => setTitle(event.target.value)} placeholder="Например, выпить воды" /></label>
+        <label>Время<input required type="time" value={time} onChange={(event) => setTime(event.target.value)} /></label>
+        <label>Категория<select value={kind} onChange={(event) => setKind(event.target.value as RoutineKind)}><option value="water">Вода</option><option value="meal">Питание</option><option value="break">Перерыв</option><option value="focus">Фокус</option><option value="custom">Другое</option></select></label>
+        <label className="field-full">Напомнить<select value={remindBeforeMinutes} onChange={(event) => setRemindBeforeMinutes(Number(event.target.value))}><option value={0}>В момент начала</option><option value={5}>За 5 минут</option><option value={10}>За 10 минут</option><option value={15}>За 15 минут</option><option value={30}>За 30 минут</option></select></label>
+        <fieldset className="routine-days"><legend>Повторять</legend><div>{routineWeekdays.map((day) => <button key={day.value} type="button" className={days.includes(day.value) ? "active" : ""} aria-pressed={days.includes(day.value)} onClick={() => toggleDay(day.value)}>{day.short}</button>)}</div></fieldset>
+      </div>
+      {error ? <div className="form-error" role="alert">{error}</div> : null}
+      <div className="modal-actions event-actions">{existing ? <button type="button" className="danger-button" onClick={() => onDelete(existing)}><Trash2 size={16} />Удалить</button> : null}<span /><button type="button" className="secondary-button" onClick={onClose}>Отмена</button><button className="primary-button"><Check size={17} />Сохранить</button></div>
+    </form>
+  </div>;
+}
+
+async function openWidget(kind: "agenda" | "rhythm") {
+  const isRhythm = kind === "rhythm";
+  const label = isRhythm ? "rhythm-widget" : "agenda-widget";
   try {
     const { WebviewWindow } = await import("@tauri-apps/api/webviewWindow");
-    const existing = await WebviewWindow.getByLabel("agenda-widget");
+    const existing = await WebviewWindow.getByLabel(label);
     if (existing) { await existing.show(); await existing.setFocus(); return; }
-    new WebviewWindow("agenda-widget", { url: "/?widget=agenda", title: "DayDesk — Сегодня", width: 360, height: 510, decorations: false, transparent: true, resizable: false, skipTaskbar: true, alwaysOnBottom: true, shadow: true });
+    new WebviewWindow(label, { url: `/?widget=${kind}`, title: isRhythm ? "DayDesk — Ритм дня" : "DayDesk — Сегодня", width: 360, height: 510, decorations: false, transparent: true, resizable: false, skipTaskbar: true, alwaysOnBottom: true, shadow: true });
   } catch {
-    window.open("/?widget=agenda", "daydesk-widget", "width=360,height=510");
+    window.open(`/?widget=${kind}`, `daydesk-${kind}-widget`, "width=360,height=510");
   }
 }
 
-function WidgetsView() {
-  return <section className="page-section"><div className="page-title"><div><span className="eyebrow">РАБОЧИЙ СТОЛ</span><h1>Виджеты</h1><p>Важное остаётся перед глазами, не мешая работе.</p></div></div><div className="widget-gallery"><div className="card widget-option"><div className="widget-preview"><div className="preview-top"><Logo /><span>Сегодня</span><MoreHorizontal size={14} /></div><strong>4 задачи</strong><div className="preview-line"><i />Презентация <span>11:30</span></div><div className="preview-line"><i />Встреча с Анной <span>15:00</span></div><div className="preview-line"><i />Заказать продукты <span>18:30</span></div></div><div className="widget-description"><div><h3>План на сегодня</h3><p>Задачи и ближайшие события</p></div><button className="primary-button" onClick={openWidget}><Plus size={17} />На рабочий стол</button></div></div><div className="card widget-option coming"><div className="coming-visual"><Clock3 size={42} /><Coffee size={28} /></div><div className="widget-description"><div><h3>Ритм дня</h3><p>Вода, обед, отдых и фокус</p></div><span>Скоро</span></div></div></div></section>;
+function WidgetsView({ state, setState }: { state: AppState; setState: React.Dispatch<React.SetStateAction<AppState>> }) {
+  const [editor, setEditor] = useState<Routine | "new" | null>(null);
+  const routines = state.routines ?? [];
+  const nextRoutines = routineOccurrences(routines, 2).filter((event) => new Date(event.startsAt) >= new Date()).slice(0, 3);
+  const saveRoutine = (routine: Routine) => {
+    setState((current) => {
+      const currentRoutines = current.routines ?? [];
+      return { ...current, routines: currentRoutines.some((item) => item.id === routine.id) ? currentRoutines.map((item) => item.id === routine.id ? routine : item) : [...currentRoutines, routine] };
+    });
+    setEditor(null);
+  };
+  const deleteRoutine = (routine: Routine) => {
+    if (!window.confirm(`Удалить напоминание «${routine.title}»?`)) return;
+    setState((current) => ({ ...current, routines: (current.routines ?? []).filter((item) => item.id !== routine.id) }));
+    setEditor(null);
+  };
+  const toggleRoutine = (id: string) => setState((current) => ({ ...current, routines: (current.routines ?? []).map((routine) => routine.id === id ? { ...routine, enabled: !routine.enabled } : routine) }));
+
+  return <section className="page-section"><div className="page-title"><div><span className="eyebrow">РАБОЧИЙ СТОЛ</span><h1>Виджеты</h1><p>Важное остаётся перед глазами, не мешая работе.</p></div></div><div className="widget-gallery"><div className="card widget-option"><div className="widget-preview"><div className="preview-top"><Logo /><span>Сегодня</span><MoreHorizontal size={14} /></div><strong>4 задачи</strong><div className="preview-line"><i />Презентация <span>11:30</span></div><div className="preview-line"><i />Встреча с Анной <span>15:00</span></div><div className="preview-line"><i />Заказать продукты <span>18:30</span></div></div><div className="widget-description"><div><h3>План на сегодня</h3><p>Задачи и ближайшие события</p></div><button className="primary-button" onClick={() => void openWidget("agenda")}><Plus size={17} />На рабочий стол</button></div></div><div className="card widget-option"><div className="widget-preview rhythm-preview"><div className="preview-top"><Logo /><span>Ритм дня</span><Clock3 size={14} /></div><strong>{routines.filter((routine) => routine.enabled).length} напоминания</strong>{nextRoutines.length ? nextRoutines.map((routine) => <div className="preview-line" key={routine.id}><i />{routine.title}<span>{shortTime(routine.startsAt)}</span></div>) : <div className="preview-line"><i />Добавьте первый ритуал</div>}</div><div className="widget-description"><div><h3>Ритм дня</h3><p>Вода, обед, отдых и фокус</p></div><button className="primary-button" onClick={() => void openWidget("rhythm")}><Plus size={17} />На рабочий стол</button></div></div></div>
+    <div className="routine-section-title"><div><span className="eyebrow">РЕГУЛЯРНЫЕ НАПОМИНАНИЯ</span><h2>Мой ритм</h2><p>DayDesk повторит их в выбранные дни, даже когда окно свёрнуто.</p></div><button className="primary-button" onClick={() => setEditor("new")}><Plus size={17} />Добавить</button></div>
+    <div className="card routine-list">{routines.length ? routines.map((routine) => <div className={`routine-row ${routine.enabled ? "" : "disabled"}`} key={routine.id}><div className={`routine-kind ${routine.kind}`}><RoutineIcon kind={routine.kind} /></div><div className="routine-copy"><strong>{routine.title}</strong><span>{routine.time} · {routineDaysLabel(routine.days)} · {routine.remindBeforeMinutes ? `за ${routine.remindBeforeMinutes} мин` : "в момент начала"}</span></div><small>{routineKindLabel[routine.kind]}</small><button className="icon-button routine-edit" onClick={() => setEditor(routine)} aria-label={`Изменить ${routine.title}`}><Settings size={16} /></button><button className={`setting-toggle ${routine.enabled ? "active" : ""}`} role="switch" aria-checked={routine.enabled} onClick={() => toggleRoutine(routine.id)} aria-label={`${routine.enabled ? "Выключить" : "Включить"} ${routine.title}`}><i /></button></div>) : <div className="empty-state large">Добавьте обед, воду, перерыв или любой собственный ритуал.</div>}</div>
+    {editor ? <RoutineEditor existing={editor === "new" ? undefined : editor} onSave={saveRoutine} onDelete={deleteRoutine} onClose={() => setEditor(null)} /> : null}
+  </section>;
 }
 
-function WidgetApp({ state }: { state: AppState }) {
+function WidgetApp({ state, kind }: { state: AppState; kind: "agenda" | "rhythm" }) {
   const now = useClock();
+  if (kind === "rhythm") {
+    const routines = state.routines ?? [];
+    const upcoming = routineOccurrences(routines, 2, now).filter((event) => new Date(event.startsAt) >= now).slice(0, 5);
+    return <main className="desktop-widget rhythm-widget"><div className="widget-drag" data-tauri-drag-region><Logo /><span data-tauri-drag-region>Ритм дня</span><Clock3 size={17} /></div><div className="widget-date"><span>{longDate(now)}</span><strong>{new Intl.DateTimeFormat("ru-RU", { hour: "2-digit", minute: "2-digit" }).format(now)}</strong></div><div className="rhythm-widget-summary"><Sparkles size={20} /><div><strong>{upcoming.length ? `Дальше — ${upcoming[0].title}` : "На сегодня всё"}</strong><span>{upcoming.length ? shortTime(upcoming[0].startsAt) : "Можно отдохнуть"}</span></div></div><div className="widget-tasks rhythm-widget-list">{upcoming.map((routine) => <div key={routine.id}><Clock3 size={16} /><span>{routine.title}</span><time>{shortTime(routine.startsAt)}</time></div>)}</div><div className="widget-add"><Bell size={16} />{routines.filter((routine) => routine.enabled).length} активных напоминания</div></main>;
+  }
   const upcoming = state.tasks.filter((task) => !task.completed).slice(0, 4);
   return <main className="desktop-widget"><div className="widget-drag" data-tauri-drag-region><Logo /><span data-tauri-drag-region>Сегодня</span><button className="icon-button"><MoreHorizontal size={17} /></button></div><div className="widget-date"><span>{longDate(now)}</span><strong>{new Intl.DateTimeFormat("ru-RU", { hour: "2-digit", minute: "2-digit" }).format(now)}</strong></div><div className="widget-stat"><div><CheckCircle2 size={20} /><strong>{upcoming.length}</strong><span>осталось</span></div><div><CalendarDays size={20} /><strong>{state.events.length}</strong><span>событий</span></div></div><div className="widget-tasks">{upcoming.map((task) => <div key={task.id}><Circle size={17} /><span>{task.title}</span><time>{shortTime(task.dueAt)}</time></div>)}</div><button className="widget-add"><Plus size={17} />Добавить задачу</button></main>;
 }
 
 export default function App() {
-  const isWidget = new URLSearchParams(window.location.search).get("widget") === "agenda";
+  const widgetParam = new URLSearchParams(window.location.search).get("widget");
+  const widgetKind = widgetParam === "rhythm" ? "rhythm" : "agenda";
+  const isWidget = widgetParam === "agenda" || widgetParam === "rhythm";
   const [state, setState] = useState<AppState>(() => loadState());
   const [persistenceError, setPersistenceError] = useState("");
   const [reminderError, setReminderError] = useState("");
@@ -1085,6 +1220,7 @@ export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [mailCacheReady, setMailCacheReady] = useState(false);
+  const [reminderScheduleTick, setReminderScheduleTick] = useState(0);
   const searchInput = useRef<HTMLInputElement>(null);
   const mailSyncRunning = useRef(false);
   const calendarSyncRunning = useRef(false);
@@ -1103,10 +1239,16 @@ export default function App() {
 
   useEffect(() => {
     if (isWidget) return;
-    void replaceBackgroundReminders(state.events)
+    void replaceBackgroundReminders([...state.events, ...routineOccurrences(state.routines ?? [])])
       .then(() => setReminderError(""))
       .catch(() => setReminderError("Не удалось обновить фоновые напоминания. Перезапустите DayDesk."));
-  }, [isWidget, state.events]);
+  }, [isWidget, reminderScheduleTick, state.events, state.routines]);
+
+  useEffect(() => {
+    if (isWidget) return;
+    const timer = window.setInterval(() => setReminderScheduleTick((current) => current + 1), 6 * 60 * 60_000);
+    return () => window.clearInterval(timer);
+  }, [isWidget]);
 
   useEffect(() => {
     if (isWidget) return;
@@ -1324,11 +1466,11 @@ export default function App() {
     if (view === "tasks") return <TasksView state={state} setState={setState} onAdd={() => setAdding(true)} />;
     if (view === "calendar") return <CalendarView state={state} setState={setState} onAdd={openNewEvent} onEdit={openEvent} />;
     if (view === "mail") return <MailView state={state} setState={setState} searchQuery={searchQuery} />;
-    if (view === "widgets") return <WidgetsView />;
+    if (view === "widgets") return <WidgetsView state={state} setState={setState} />;
     return <TodayView state={state} setState={setState} onAddTask={() => setAdding(true)} onAddEvent={openNewEvent} onEditEvent={openEvent} />;
   }, [openEvent, openNewEvent, searchQuery, state, view]);
 
-  if (isWidget) return <WidgetApp state={state} />;
+  if (isWidget) return <WidgetApp state={state} kind={widgetKind} />;
 
   return (
     <div className="app-shell">
