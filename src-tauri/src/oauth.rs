@@ -90,8 +90,8 @@ impl OAuthProvider {
 
     fn scopes(self) -> &'static str {
         match self {
-            Self::Gmail => "https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/gmail.send",
-            Self::Outlook => "openid profile email offline_access User.Read Mail.Read Mail.Send",
+            Self::Gmail => "https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/gmail.send https://www.googleapis.com/auth/calendar.events",
+            Self::Outlook => "openid profile email offline_access User.Read Mail.Read Mail.Send Calendars.ReadWrite",
         }
     }
 }
@@ -303,7 +303,7 @@ struct MicrosoftEmailAddress {
     address: String,
 }
 
-fn validate_account_id(value: &str) -> Result<(), String> {
+pub(crate) fn validate_account_id(value: &str) -> Result<(), String> {
     if value.is_empty()
         || value.len() > 128
         || !value
@@ -339,7 +339,7 @@ fn validate_attachment_id(value: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn http_client() -> Result<Client, String> {
+pub(crate) fn http_client() -> Result<Client, String> {
     Client::builder()
         .connect_timeout(Duration::from_secs(10))
         .timeout(Duration::from_secs(30))
@@ -510,7 +510,7 @@ fn load_refresh_token(
         .map_err(|_| "Сессия не найдена. Подключите почту заново".to_string())
 }
 
-fn access_token(
+pub(crate) fn access_token(
     provider: OAuthProvider,
     account_id: &str,
     client: &Client,

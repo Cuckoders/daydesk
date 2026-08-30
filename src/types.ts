@@ -17,6 +17,23 @@ export interface CalendarEvent {
   type: "meeting" | "meal" | "focus" | "personal";
   location?: string;
   remindBeforeMinutes: number;
+  allDay?: boolean;
+  allDayStartDate?: string;
+  allDayEndDate?: string;
+  calendar?: {
+    provider: "gmail" | "outlook";
+    accountId: string;
+    remoteId?: string;
+    version?: string;
+    readOnly?: boolean;
+    reminderEnabled?: boolean;
+    usesDefaultReminder?: boolean;
+    updateReminders?: boolean;
+    updateTitle?: boolean;
+    updateTime?: boolean;
+    updateLocation?: boolean;
+    operationId?: string;
+  };
 }
 
 export interface MailAccount {
@@ -32,6 +49,8 @@ export interface MailAccount {
   smtpPort?: number;
   authType?: "password" | "oauth";
   lastSyncedAt?: string;
+  calendarEnabled?: boolean;
+  lastCalendarSyncedAt?: string;
 }
 
 export interface MailMessage {

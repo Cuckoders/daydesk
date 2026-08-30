@@ -1,3 +1,4 @@
+mod calendar;
 mod compose;
 mod downloads;
 mod lifecycle;
@@ -59,7 +60,10 @@ pub fn run() {
             reminders::replace_reminders,
             lifecycle::is_autostart_enabled,
             lifecycle::set_autostart_enabled,
-            lifecycle::quit_daydesk
+            lifecycle::quit_daydesk,
+            calendar::sync_calendar,
+            calendar::upsert_calendar_event,
+            calendar::delete_calendar_event
         ])
         .build(tauri::generate_context!())
         .expect("не удалось собрать DayDesk");

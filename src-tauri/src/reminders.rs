@@ -17,6 +17,7 @@ pub struct ReminderInput {
     starts_at: String,
     location: Option<String>,
     remind_before_minutes: i64,
+    reminder_enabled: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -56,13 +57,16 @@ fn validate_text(value: &str, field: &str, max_chars: usize) -> Result<String, S
 }
 
 fn normalize_reminders(events: Vec<ReminderInput>) -> Result<Vec<ScheduledReminder>, String> {
+    let events = events
+        .into_iter()
+        .filter(|event| event.reminder_enabled)
+        .collect::<Vec<_>>();
     if events.len() > MAX_REMINDERS {
         return Err("Слишком много событий для фоновых напоминаний".into());
     }
 
     events
         .into_iter()
-        .filter(|event| event.remind_before_minutes > 0)
         .map(|event| {
             if event.remind_before_minutes > MAX_REMINDER_MINUTES {
                 return Err("Интервал напоминания не может превышать семь дней".into());
@@ -93,7 +97,12 @@ fn take_due(book: &mut ReminderBook, now: DateTime<Utc>) -> Vec<DueReminder> {
     let mut due = Vec::new();
 
     for reminder in &book.scheduled {
-        if book.notified.contains(&reminder.key) || reminder.starts_at <= now {
+        let grace = if reminder.remind_before_minutes == 0 {
+            ChronoDuration::seconds(30)
+        } else {
+            ChronoDuration::zero()
+        };
+        if book.notified.contains(&reminder.key) || reminder.starts_at + grace <= now {
             continue;
         }
         let notify_at =
@@ -102,12 +111,16 @@ fn take_due(book: &mut ReminderBook, now: DateTime<Utc>) -> Vec<DueReminder> {
             continue;
         }
 
-        let seconds_left = (reminder.starts_at - now).num_seconds().max(1);
+        let seconds_left = (reminder.starts_at - now).num_seconds().max(0);
         let minutes_left = (seconds_left + 59) / 60;
         book.notified.insert(reminder.key.clone());
         due.push(DueReminder {
             key: reminder.key.clone(),
-            title: format!("Через {minutes_left} мин: {}", reminder.title),
+            title: if reminder.remind_before_minutes == 0 {
+                format!("Сейчас: {}", reminder.title)
+            } else {
+                format!("Через {minutes_left} мин: {}", reminder.title)
+            },
             body: reminder
                 .location
                 .clone()
@@ -180,6 +193,7 @@ mod tests {
             starts_at: starts_at.into(),
             location: Some("Переговорная".into()),
             remind_before_minutes,
+            reminder_enabled: remind_before_minutes > 0,
         }
     }
 
@@ -230,5 +244,35 @@ mod tests {
             ..input("2026-08-30T12:00:00Z", 10)
         }])
         .is_err());
+    }
+
+    #[test]
+    fn supports_enabled_at_start_reminders() {
+        let now = DateTime::parse_from_rfc3339("2026-08-30T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let scheduled = normalize_reminders(vec![ReminderInput {
+            reminder_enabled: true,
+            ..input("2026-08-30T12:00:00Z", 0)
+        }])
+        .unwrap();
+        let mut book = ReminderBook {
+            scheduled,
+            ..Default::default()
+        };
+        let due = take_due(&mut book, now);
+        assert_eq!(due.len(), 1);
+        assert!(due[0].title.starts_with("Сейчас:"));
+    }
+
+    #[test]
+    fn counts_only_enabled_reminders_against_the_limit() {
+        let disabled = ReminderInput {
+            reminder_enabled: false,
+            ..input("2026-08-30T12:00:00Z", 0)
+        };
+        assert!(normalize_reminders(vec![disabled; MAX_REMINDERS + 1])
+            .unwrap()
+            .is_empty());
     }
 }

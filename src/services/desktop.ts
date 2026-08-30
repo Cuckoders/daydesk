@@ -11,7 +11,16 @@ async function invokeDesktop<T>(command: string, payload: Record<string, unknown
 
 export async function replaceBackgroundReminders(events: CalendarEvent[]): Promise<void> {
   if (!isDesktopApp()) return;
-  await invokeDesktop<void>("replace_reminders", { events });
+  await invokeDesktop<void>("replace_reminders", {
+    events: events.map((event) => ({
+      id: event.id,
+      title: event.title,
+      startsAt: event.startsAt,
+      location: event.location,
+      remindBeforeMinutes: event.remindBeforeMinutes,
+      reminderEnabled: event.calendar?.reminderEnabled ?? event.remindBeforeMinutes > 0,
+    })),
+  });
 }
 
 export async function isAutostartEnabled(): Promise<boolean> {

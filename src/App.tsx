@@ -44,6 +44,7 @@ import { clearMailAttachments, selectMailAttachments, sendMail, type SelectedMai
 import { isAutostartEnabled, quitDayDesk, replaceBackgroundReminders, setAutostartEnabled } from "./services/desktop";
 import { loadMailCache, replaceMailCache, searchMailCache } from "./services/mailCache";
 import { connectOAuth, disconnectOAuth, downloadOAuthAttachment, getOAuthMessageContent, getOAuthProviderStatus, syncOAuth, type OAuthProvider, type OAuthProviderStatus } from "./services/oauth";
+import { deleteRemoteCalendarEvent, syncRemoteCalendar, toCalendarEvent, upsertRemoteCalendarEvent } from "./services/calendar";
 import { loadState, saveState, stateChannel } from "./services/storage";
 import type { AppState, CalendarEvent, MailAccount, MailAttachment, MailMessage, Task } from "./types";
 
@@ -60,8 +61,18 @@ const navItems: { id: View; label: string; icon: typeof LayoutDashboard }[] = [
 const shortTime = (iso: string) => new Intl.DateTimeFormat("ru-RU", { hour: "2-digit", minute: "2-digit" }).format(new Date(iso));
 const longDate = (date: Date) => new Intl.DateTimeFormat("ru-RU", { weekday: "long", day: "numeric", month: "long" }).format(date);
 const weekday = (date: Date) => new Intl.DateTimeFormat("ru-RU", { weekday: "short" }).format(date).replace(".", "");
-const uid = () => crypto.randomUUID?.() ?? `${Date.now()}-${Math.random()}`;
+const uid = () => crypto.randomUUID?.() ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
 const sameDay = (left: Date, right: Date) => left.getFullYear() === right.getFullYear() && left.getMonth() === right.getMonth() && left.getDate() === right.getDate();
+const localDateKey = (date: Date) => `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+const eventOccursOnDate = (event: CalendarEvent, date: Date) => {
+  if (event.allDay && event.allDayStartDate && event.allDayEndDate) {
+    const key = localDateKey(date);
+    return event.allDayStartDate <= key && key < event.allDayEndDate;
+  }
+  const dayStart = new Date(date.getFullYear(), date.getMonth(), date.getDate());
+  const dayEnd = new Date(date.getFullYear(), date.getMonth(), date.getDate() + 1);
+  return new Date(event.startsAt) < dayEnd && new Date(event.endsAt) > dayStart;
+};
 const pad = (value: number) => String(value).padStart(2, "0");
 const inputDate = (iso: string) => {
   const date = new Date(iso);
@@ -72,6 +83,30 @@ const inputTime = (iso: string) => {
   return `${pad(date.getHours())}:${pad(date.getMinutes())}`;
 };
 const combineDateTime = (date: string, time: string) => new Date(`${date}T${time}:00`).toISOString();
+const calendarRange = () => {
+  const timeMin = new Date();
+  timeMin.setDate(timeMin.getDate() - 30);
+  const timeMax = new Date();
+  timeMax.setDate(timeMax.getDate() + 365);
+  return { timeMin: timeMin.toISOString(), timeMax: timeMax.toISOString() };
+};
+const isCalendarAccount = (account: MailAccount): account is MailAccount & { provider: OAuthProvider } =>
+  account.authType === "oauth" && (account.provider === "gmail" || account.provider === "outlook");
+let calendarMutationVersion = 0;
+let calendarSyncVersion = 0;
+const fetchCalendarEvents = async (account: MailAccount & { provider: OAuthProvider }) => {
+  const remote = await syncRemoteCalendar({ provider: account.provider, accountId: account.id, ...calendarRange() });
+  return remote.map((event) => toCalendarEvent(account, event));
+};
+const replaceAccountCalendarEvents = (current: CalendarEvent[], accountId: string, fresh: CalendarEvent[]) => {
+  const previousTypes = new Map(current
+    .filter((event) => event.calendar?.accountId === accountId && event.calendar.remoteId)
+    .map((event) => [event.calendar?.remoteId, event.type]));
+  return [...current.filter((event) => event.calendar?.accountId !== accountId), ...fresh.map((event) => ({
+    ...event,
+    type: previousTypes.get(event.calendar?.remoteId) ?? event.type,
+  }))].sort((left, right) => left.startsAt.localeCompare(right.startsAt));
+};
 const fileSize = (bytes: number) => {
   if (bytes <= 0) return "Размер неизвестен";
   if (bytes < 1024) return `${bytes} Б`;
@@ -185,7 +220,7 @@ function MiniCalendar({ events, selectedDate = new Date(), onSelect }: { events:
     <div className="week-strip">
       {days.map((day) => {
         const isSelected = sameDay(day, selectedDate);
-        const hasEvents = events.some((event) => sameDay(new Date(event.startsAt), day));
+        const hasEvents = events.some((event) => eventOccursOnDate(event, day));
         return <button key={day.toISOString()} className={isSelected ? "selected" : ""} onClick={() => onSelect?.(day)} aria-label={longDate(day)}><span>{weekday(day)}</span><strong>{day.getDate()}</strong>{hasEvents ? <i /> : null}</button>;
       })}
     </div>
@@ -213,13 +248,14 @@ function EventIcon({ type }: { type: CalendarEvent["type"] }) {
 }
 
 function EventRow({ event, onEdit }: { event: CalendarEvent; onEdit?: (event: CalendarEvent) => void }) {
+  const source = event.calendar?.provider === "gmail" ? "Google Calendar" : event.calendar?.provider === "outlook" ? "Outlook Calendar" : undefined;
   return (
     <div className={`event-row event-${event.type}`}>
-      <div className="event-time"><strong>{shortTime(event.startsAt)}</strong><span>{shortTime(event.endsAt)}</span></div>
+      <div className="event-time"><strong>{event.allDay ? "Весь день" : shortTime(event.startsAt)}</strong><span>{event.allDay ? "" : shortTime(event.endsAt)}</span></div>
       <div className="event-bar" />
       <div className="event-icon"><EventIcon type={event.type} /></div>
-      <div className="event-copy"><strong>{event.title}</strong><span>{event.location ?? (event.type === "meal" ? "Перерыв" : "Личное время")}</span></div>
-      <button className="icon-button event-menu" onClick={() => onEdit?.(event)} aria-label={`Изменить событие «${event.title}»`}><MoreHorizontal size={18} /></button>
+      <div className="event-copy"><strong>{event.title}</strong><span>{[event.location ?? (event.type === "meal" ? "Перерыв" : "Личное время"), source].filter(Boolean).join(" · ")}</span></div>
+      {onEdit && !event.calendar?.readOnly ? <button className="icon-button event-menu" onClick={() => onEdit(event)} aria-label={`Изменить событие «${event.title}»`}><MoreHorizontal size={18} /></button> : null}
     </div>
   );
 }
@@ -461,7 +497,7 @@ function AddTask({ onAdd, onClose }: { onAdd: (title: string, time: string) => v
   );
 }
 
-function EventEditor({ existing, onSave, onDelete, onClose }: { existing?: CalendarEvent; onSave: (event: CalendarEvent) => void; onDelete: (id: string) => void; onClose: () => void }) {
+function EventEditor({ existing, accounts, onSave, onDelete, onClose }: { existing?: CalendarEvent; accounts: MailAccount[]; onSave: (event: CalendarEvent) => Promise<void>; onDelete: (event: CalendarEvent) => Promise<void>; onClose: () => void }) {
   const defaults = useMemo(() => {
     const start = new Date();
     start.setMinutes(0, 0, 0);
@@ -471,28 +507,68 @@ function EventEditor({ existing, onSave, onDelete, onClose }: { existing?: Calen
   }, []);
   const [title, setTitle] = useState(() => existing?.title ?? "");
   const [date, setDate] = useState(() => inputDate(existing?.startsAt ?? defaults.start));
+  const [endDate, setEndDate] = useState(() => inputDate(existing?.endsAt ?? defaults.end));
   const [startsAt, setStartsAt] = useState(() => inputTime(existing?.startsAt ?? defaults.start));
   const [endsAt, setEndsAt] = useState(() => inputTime(existing?.endsAt ?? defaults.end));
   const [type, setType] = useState<CalendarEvent["type"]>(() => existing?.type ?? "meeting");
   const [location, setLocation] = useState(() => existing?.location ?? "");
   const [reminder, setReminder] = useState(() => existing?.remindBeforeMinutes ?? 10);
+  const [reminderEnabled, setReminderEnabled] = useState(() => existing ? (existing.calendar?.reminderEnabled ?? existing.remindBeforeMinutes > 0) : true);
+  const [reminderDirty, setReminderDirty] = useState(() => !existing);
+  const [usesDefaultReminder, setUsesDefaultReminder] = useState(() => existing?.calendar?.usesDefaultReminder ?? false);
+  const [calendarAccountId, setCalendarAccountId] = useState(() => existing?.calendar?.accountId ?? "local");
   const [error, setError] = useState("");
+  const [working, setWorking] = useState(false);
+  const [operationId] = useState(uid);
+  const calendarAccounts = accounts.filter((account) => isCalendarAccount(account) && account.calendarEnabled);
 
-  const submit = (event: FormEvent) => {
+  const submit = async (event: FormEvent) => {
     event.preventDefault();
-    if (!title.trim()) return;
+    if (!title.trim() || working) return;
     const start = combineDateTime(date, startsAt);
-    const end = combineDateTime(date, endsAt);
+    const end = combineDateTime(endDate, endsAt);
     if (new Date(end) <= new Date(start)) {
       setError("Время окончания должно быть позже начала");
       return;
     }
-    onSave({ id: existing?.id ?? uid(), title: title.trim(), startsAt: start, endsAt: end, type, location: location.trim() || undefined, remindBeforeMinutes: reminder });
+    const account = calendarAccounts.find((item) => item.id === calendarAccountId);
+    const normalizedLocation = location.trim() || undefined;
+    const updateTitle = !existing || title.trim() !== existing.title;
+    const updateTime = !existing
+      || date !== inputDate(existing.startsAt)
+      || startsAt !== inputTime(existing.startsAt)
+      || endDate !== inputDate(existing.endsAt)
+      || endsAt !== inputTime(existing.endsAt);
+    const updateLocation = !existing || normalizedLocation !== existing.location;
+    setError("");
+    setWorking(true);
+    try {
+      await onSave({
+        id: existing?.id ?? uid(),
+        title: title.trim(),
+        startsAt: start,
+        endsAt: end,
+        type,
+        location: normalizedLocation,
+        remindBeforeMinutes: reminderEnabled ? reminder : 0,
+        calendar: account ? { provider: account.provider as OAuthProvider, accountId: account.id, remoteId: existing?.calendar?.remoteId, version: existing?.calendar?.version, reminderEnabled, usesDefaultReminder, updateReminders: reminderDirty, updateTitle, updateTime, updateLocation, operationId } : undefined,
+      });
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Не удалось сохранить событие");
+      setWorking(false);
+    }
   };
 
-  const remove = () => {
+  const remove = async () => {
     if (!existing || !window.confirm(`Удалить событие «${existing.title}»?`)) return;
-    onDelete(existing.id);
+    setError("");
+    setWorking(true);
+    try {
+      await onDelete(existing);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Не удалось удалить событие");
+      setWorking(false);
+    }
   };
 
   return (
@@ -504,14 +580,16 @@ function EventEditor({ existing, onSave, onDelete, onClose }: { existing?: Calen
         <div className="form-grid">
           <label className="field-full">Название<input autoFocus value={title} onChange={(event) => setTitle(event.target.value)} placeholder="Например, встреча с командой" /></label>
           <label>Тип<select value={type} onChange={(event) => setType(event.target.value as CalendarEvent["type"])}><option value="meeting">Встреча</option><option value="meal">Обед или ужин</option><option value="focus">Фокус-время</option><option value="personal">Личное</option></select></label>
-          <label>Дата<input type="date" value={date} onChange={(event) => setDate(event.target.value)} /></label>
+          <label>Дата начала<input type="date" value={date} onChange={(event) => setDate(event.target.value)} /></label>
+          <label>Дата окончания<input type="date" value={endDate} min={date} onChange={(event) => setEndDate(event.target.value)} /></label>
           <label>Начало<input type="time" value={startsAt} onChange={(event) => { setStartsAt(event.target.value); setError(""); }} /></label>
           <label>Окончание<input type="time" value={endsAt} onChange={(event) => { setEndsAt(event.target.value); setError(""); }} /></label>
           <label className="field-full">Место или ссылка<input value={location} onChange={(event) => setLocation(event.target.value)} placeholder="Необязательно" /></label>
-          <label className="field-full">Напомнить<select value={reminder} onChange={(event) => setReminder(Number(event.target.value))}><option value={0}>Не напоминать</option><option value={5}>За 5 минут</option><option value={10}>За 10 минут</option><option value={15}>За 15 минут</option><option value={30}>За 30 минут</option><option value={60}>За 1 час</option></select></label>
+          <label>Напомнить<select value={usesDefaultReminder ? "default" : reminderEnabled ? `minutes:${reminder}` : "none"} onChange={(event) => { const value = event.target.value; setReminderDirty(true); setUsesDefaultReminder(value === "default"); setReminderEnabled(value !== "none"); if (value.startsWith("minutes:")) setReminder(Number(value.slice(8))); }}>{usesDefaultReminder ? <option value="default">По умолчанию календаря</option> : null}<option value="none">Не напоминать</option>{calendarAccountId !== "local" ? <option value="minutes:0">В момент начала</option> : null}<option value="minutes:5">За 5 минут</option><option value="minutes:10">За 10 минут</option><option value="minutes:15">За 15 минут</option><option value="minutes:30">За 30 минут</option><option value="minutes:60">За 1 час</option></select></label>
+          <label>Календарь<select value={calendarAccountId} disabled={Boolean(existing?.calendar)} onChange={(event) => setCalendarAccountId(event.target.value)}><option value="local">Только DayDesk</option>{calendarAccounts.map((account) => <option key={account.id} value={account.id}>{account.provider === "gmail" ? "Google" : "Outlook"} · {account.address}</option>)}</select></label>
         </div>
         {error ? <div className="form-error">{error}</div> : null}
-        <div className="modal-actions event-actions">{existing ? <button type="button" className="danger-button" onClick={remove}><Trash2 size={16} />Удалить</button> : null}<span /><button type="button" className="secondary-button" onClick={onClose}>Отмена</button><button className="primary-button"><Check size={17} />Сохранить</button></div>
+        <div className="modal-actions event-actions">{existing ? <button type="button" className="danger-button" disabled={working} onClick={() => void remove()}><Trash2 size={16} />Удалить</button> : null}<span /><button type="button" className="secondary-button" disabled={working} onClick={onClose}>Отмена</button><button className="primary-button" disabled={working}>{working ? <LoaderCircle className="spin" size={17} /> : <Check size={17} />}{working ? "Сохраняем…" : "Сохранить"}</button></div>
       </form>
     </div>
   );
@@ -522,7 +600,7 @@ function TodayView({ state, setState, onAddTask, onAddEvent, onEditEvent }: { st
   const greeting = now.getHours() < 12 ? "Доброе утро" : now.getHours() < 18 ? "Добрый день" : "Добрый вечер";
   const completed = state.tasks.filter((task) => task.completed).length;
   const progress = state.tasks.length ? Math.round((completed / state.tasks.length) * 100) : 0;
-  const todayEvents = state.events.filter((event) => sameDay(new Date(event.startsAt), now)).sort((left, right) => left.startsAt.localeCompare(right.startsAt));
+  const todayEvents = state.events.filter((event) => eventOccursOnDate(event, now)).sort((left, right) => left.startsAt.localeCompare(right.startsAt));
   const toggleTask = (id: string) => setState((current) => ({ ...current, tasks: current.tasks.map((task) => task.id === id ? { ...task, completed: !task.completed } : task) }));
   return (
     <>
@@ -550,10 +628,71 @@ function TasksView({ state, setState, onAdd }: { state: AppState; setState: Reac
   return <section className="page-section"><div className="page-title"><div><span className="eyebrow">МОЙ ДЕНЬ</span><h1>Задачи</h1><p>Соберите всё важное в одном спокойном списке.</p></div><button className="primary-button" onClick={onAdd}><Plus size={17} />Новая задача</button></div><div className="card large-list">{state.tasks.map((task) => <TaskRow key={task.id} task={task} onToggle={toggle} />)}<button className="add-row" onClick={onAdd}><Plus size={17} />Добавить задачу</button></div></section>;
 }
 
-function CalendarView({ events, onAdd, onEdit }: { events: CalendarEvent[]; onAdd: () => void; onEdit: (event: CalendarEvent) => void }) {
+function CalendarView({ state, setState, onAdd, onEdit }: { state: AppState; setState: React.Dispatch<React.SetStateAction<AppState>>; onAdd: () => void; onEdit: (event: CalendarEvent) => void }) {
   const [selectedDate, setSelectedDate] = useState(() => new Date());
-  const selectedEvents = useMemo(() => events.filter((event) => sameDay(new Date(event.startsAt), selectedDate)).sort((left, right) => left.startsAt.localeCompare(right.startsAt)), [events, selectedDate]);
-  return <section className="page-section"><div className="page-title"><div><span className="eyebrow">ПЛАН НА ДЕНЬ</span><h1>Календарь</h1><p>Встречи, питание и фокус-время без накладок.</p></div><button className="primary-button" onClick={onAdd}><Plus size={17} />Новое событие</button></div><MiniCalendar events={events} selectedDate={selectedDate} onSelect={setSelectedDate} /><div className="calendar-date-title"><strong>{longDate(selectedDate)}</strong><span>{selectedEvents.length} {selectedEvents.length === 1 ? "событие" : selectedEvents.length > 1 && selectedEvents.length < 5 ? "события" : "событий"}</span></div><div className="card calendar-list">{selectedEvents.length ? selectedEvents.map((event) => <EventRow key={event.id} event={event} onEdit={onEdit} />) : <div className="empty-state large">Свободный день — можно запланировать отдых или фокус-время.</div>}</div></section>;
+  const [workingAccount, setWorkingAccount] = useState<string | null>(null);
+  const [status, setStatus] = useState("");
+  const [error, setError] = useState("");
+  const calendarAccounts = state.accounts.filter(isCalendarAccount);
+  const selectedEvents = useMemo(() => state.events.filter((event) => eventOccursOnDate(event, selectedDate)).sort((left, right) => left.startsAt.localeCompare(right.startsAt)), [state.events, selectedDate]);
+
+  const synchronize = async (account: MailAccount & { provider: OAuthProvider }, enable = false) => {
+    const startedAtMutation = calendarMutationVersion;
+    const syncVersion = ++calendarSyncVersion;
+    setWorkingAccount(account.id);
+    setError("");
+    setStatus("");
+    try {
+      const events = await fetchCalendarEvents(account);
+      if (startedAtMutation !== calendarMutationVersion || syncVersion !== calendarSyncVersion) {
+        setStatus("Календарь изменился во время обновления — запустите синхронизацию ещё раз");
+        return;
+      }
+      const syncedAt = new Date().toISOString();
+      setState((current) => {
+        const currentAccount = current.accounts.find((item) => item.id === account.id);
+        if (!currentAccount || !isCalendarAccount(currentAccount) || (!enable && !currentAccount.calendarEnabled)) {
+          return current;
+        }
+        return {
+          ...current,
+          events: replaceAccountCalendarEvents(current.events, account.id, events),
+          accounts: current.accounts.map((item) => item.id === account.id ? { ...item, calendarEnabled: true, lastCalendarSyncedAt: syncedAt } : item),
+        };
+      });
+      setStatus(`${account.provider === "gmail" ? "Google" : "Outlook"}: загружено событий — ${events.length}`);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Не удалось обновить календарь");
+      if (enable) setState((current) => ({ ...current, accounts: current.accounts.map((item) => item.id === account.id ? { ...item, calendarEnabled: false } : item) }));
+    } finally {
+      setWorkingAccount(null);
+    }
+  };
+
+  const toggleCalendar = (account: MailAccount & { provider: OAuthProvider }) => {
+    if (!account.calendarEnabled) {
+      void synchronize(account, true);
+      return;
+    }
+    calendarMutationVersion += 1;
+    calendarSyncVersion += 1;
+    setState((current) => ({
+      ...current,
+      events: current.events.filter((event) => event.calendar?.accountId !== account.id),
+      accounts: current.accounts.map((item) => item.id === account.id ? { ...item, calendarEnabled: false, lastCalendarSyncedAt: undefined } : item),
+    }));
+    setStatus(`${account.provider === "gmail" ? "Google" : "Outlook"} Calendar отключён. События в исходном календаре сохранены.`);
+  };
+
+  return <section className="page-section">
+    <div className="page-title"><div><span className="eyebrow">ПЛАН НА ДЕНЬ</span><h1>Календарь</h1><p>Встречи, питание и фокус-время без накладок.</p></div><button className="primary-button" onClick={onAdd}><Plus size={17} />Новое событие</button></div>
+    {calendarAccounts.length > 0 ? <div className="calendar-account-grid">{calendarAccounts.map((account) => <div className={`card calendar-account-card ${account.calendarEnabled ? "enabled" : ""}`} key={account.id}><div className={`provider-logo ${account.provider}`}>{account.provider === "gmail" ? "M" : "O"}</div><div><strong>{account.provider === "gmail" ? "Google Calendar" : "Outlook Calendar"}</strong><span>{account.address}</span><small>{account.calendarEnabled ? account.lastCalendarSyncedAt ? `Обновлён ${shortTime(account.lastCalendarSyncedAt)}` : "Синхронизация включена" : "Синхронизация выключена"}</small></div><div className="calendar-account-actions">{account.calendarEnabled ? <button className="icon-button" disabled={workingAccount === account.id} onClick={() => void synchronize(account)} title="Обновить календарь">{workingAccount === account.id ? <LoaderCircle className="spin" size={15} /> : <RefreshCw size={15} />}</button> : null}<button className={`setting-toggle ${account.calendarEnabled ? "active" : ""}`} disabled={workingAccount === account.id} onClick={() => toggleCalendar(account)} aria-label={account.calendarEnabled ? "Отключить календарь" : "Включить календарь"}><i /></button></div></div>)}</div> : <div className="calendar-connect-note"><CalendarDays size={18} /><span>Подключите Gmail или Outlook в разделе «Почта», чтобы объединить рабочие календари с DayDesk.</span></div>}
+    {error ? <div className="form-error calendar-sync-message" role="alert">{error}</div> : null}
+    {status ? <div className="mail-action-status calendar-sync-message" role="status"><CheckCircle2 size={16} />{status}</div> : null}
+    <MiniCalendar events={state.events} selectedDate={selectedDate} onSelect={setSelectedDate} />
+    <div className="calendar-date-title"><strong>{longDate(selectedDate)}</strong><span>{selectedEvents.length} {selectedEvents.length === 1 ? "событие" : selectedEvents.length > 1 && selectedEvents.length < 5 ? "события" : "событий"}</span></div>
+    <div className="card calendar-list">{selectedEvents.length ? selectedEvents.map((event) => <EventRow key={event.id} event={event} onEdit={onEdit} />) : <div className="empty-state large">Свободный день — можно запланировать отдых или фокус-время.</div>}</div>
+  </section>;
 }
 
 const mailPresets = [
@@ -764,6 +903,7 @@ function MailView({ state, setState, searchQuery }: { state: AppState; setState:
         color: provider === "gmail" ? "#e95c55" : "#3478f6",
         authType: "oauth",
         lastSyncedAt: new Date().toISOString(),
+        calendarEnabled: true,
       };
       connected(account, toMailMessages(account, result.messages));
     } catch (reason) {
@@ -805,10 +945,15 @@ function MailView({ state, setState, searchQuery }: { state: AppState; setState:
       } else {
         await disconnectImap(account.id);
       }
+      if (isCalendarAccount(account)) {
+        calendarMutationVersion += 1;
+        calendarSyncVersion += 1;
+      }
       setState((current) => ({
         ...current,
         accounts: current.accounts.filter((item) => item.id !== account.id),
         messages: current.messages.filter((message) => message.accountId !== account.id),
+        events: current.events.filter((event) => event.calendar?.accountId !== account.id),
       }));
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Не удалось отключить почту");
@@ -931,6 +1076,8 @@ function WidgetApp({ state }: { state: AppState }) {
 export default function App() {
   const isWidget = new URLSearchParams(window.location.search).get("widget") === "agenda";
   const [state, setState] = useState<AppState>(() => loadState());
+  const [persistenceError, setPersistenceError] = useState("");
+  const [reminderError, setReminderError] = useState("");
   const [view, setView] = useState<View>("today");
   const [adding, setAdding] = useState(false);
   const [eventEditor, setEventEditor] = useState<CalendarEvent | "new" | null>(null);
@@ -940,18 +1087,25 @@ export default function App() {
   const [mailCacheReady, setMailCacheReady] = useState(false);
   const searchInput = useRef<HTMLInputElement>(null);
   const mailSyncRunning = useRef(false);
+  const calendarSyncRunning = useRef(false);
   const mailAccountsKey = state.accounts
     .map((account) => [account.id, account.provider, account.authType, account.address, account.imapHost ?? "", account.imapPort ?? ""].join(":"))
     .join("|");
+  const calendarAccountsKey = state.accounts
+    .filter(isCalendarAccount)
+    .map((account) => [account.id, account.provider, account.calendarEnabled ? "on" : "off"].join(":"))
+    .join("|");
 
   useEffect(() => {
-    saveState(state);
+    setPersistenceError(saveState(state) ?? "");
     stateChannel?.postMessage({ ...state, messages: [] });
   }, [state]);
 
   useEffect(() => {
     if (isWidget) return;
-    void replaceBackgroundReminders(state.events).catch(() => undefined);
+    void replaceBackgroundReminders(state.events)
+      .then(() => setReminderError(""))
+      .catch(() => setReminderError("Не удалось обновить фоновые напоминания. Перезапустите DayDesk."));
   }, [isWidget, state.events]);
 
   useEffect(() => {
@@ -1044,6 +1198,51 @@ export default function App() {
     };
   }, [isWidget, mailAccountsKey]);
 
+  useEffect(() => {
+    if (isWidget || !calendarAccountsKey) return;
+    let cancelled = false;
+    const accounts = state.accounts.filter((account): account is MailAccount & { provider: OAuthProvider } => isCalendarAccount(account) && Boolean(account.calendarEnabled));
+    if (accounts.length === 0) return;
+    const synchronizeAll = async () => {
+      if (calendarSyncRunning.current) return;
+      calendarSyncRunning.current = true;
+      const startedAtMutation = calendarMutationVersion;
+      const syncVersion = ++calendarSyncVersion;
+      try {
+        const results = await Promise.allSettled(accounts.map(async (account) => ({ account, events: await fetchCalendarEvents(account) })));
+        if (cancelled || startedAtMutation !== calendarMutationVersion || syncVersion !== calendarSyncVersion) return;
+        const successful = results.flatMap((result) => result.status === "fulfilled" ? [result.value] : []);
+        if (successful.length === 0) return;
+        const syncedAt = new Date().toISOString();
+        setState((current) => {
+          let events = current.events;
+          const syncedIds = new Set<string>();
+          for (const result of successful) {
+            const currentAccount = current.accounts.find((account) => account.id === result.account.id);
+            if (!currentAccount || !isCalendarAccount(currentAccount) || !currentAccount.calendarEnabled) continue;
+            events = replaceAccountCalendarEvents(events, result.account.id, result.events);
+            syncedIds.add(result.account.id);
+          }
+          if (syncedIds.size === 0) return current;
+          return {
+            ...current,
+            events,
+            accounts: current.accounts.map((account) => syncedIds.has(account.id) ? { ...account, lastCalendarSyncedAt: syncedAt } : account),
+          };
+        });
+      } finally {
+        calendarSyncRunning.current = false;
+      }
+    };
+    const initialTimer = window.setTimeout(() => void synchronizeAll(), 20_000);
+    const interval = window.setInterval(() => void synchronizeAll(), 10 * 60_000);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(initialTimer);
+      window.clearInterval(interval);
+    };
+  }, [isWidget, calendarAccountsKey]);
+
   const addTask = useCallback((title: string, time: string) => {
     const [hours, minutes] = time.split(":").map(Number);
     const due = new Date();
@@ -1052,17 +1251,69 @@ export default function App() {
     setAdding(false);
   }, []);
 
-  const saveEvent = useCallback((event: CalendarEvent) => {
+  const saveEvent = useCallback(async (event: CalendarEvent) => {
+    let saved = event;
+    if (event.calendar) {
+      const account = state.accounts.find((item) => item.id === event.calendar?.accountId);
+      if (!account || !isCalendarAccount(account) || !account.calendarEnabled) throw new Error("Календарный аккаунт отключён");
+      const updatesProvider = !event.calendar.remoteId
+        || Boolean(event.calendar.updateTitle)
+        || Boolean(event.calendar.updateTime)
+        || Boolean(event.calendar.updateLocation)
+        || Boolean(event.calendar.updateReminders);
+      if (updatesProvider) {
+        const remote = await upsertRemoteCalendarEvent({
+          provider: account.provider,
+          accountId: account.id,
+          remoteId: event.calendar.remoteId,
+          title: event.title,
+          startsAt: event.startsAt,
+          endsAt: event.endsAt,
+          location: event.location,
+          remindBeforeMinutes: event.remindBeforeMinutes,
+          reminderEnabled: event.calendar.reminderEnabled ?? event.remindBeforeMinutes > 0,
+          usesDefaultReminder: event.calendar.usesDefaultReminder,
+          updateReminders: event.calendar.updateReminders ?? false,
+          updateTitle: event.calendar.updateTitle ?? false,
+          updateTime: event.calendar.updateTime ?? false,
+          updateLocation: event.calendar.updateLocation ?? false,
+          version: event.calendar.version,
+          operationId: event.calendar.operationId,
+        });
+        calendarMutationVersion += 1;
+        saved = { ...toCalendarEvent(account, remote), type: event.type };
+      } else {
+        saved = {
+          ...event,
+          calendar: {
+            ...event.calendar,
+            updateReminders: undefined,
+            updateTitle: undefined,
+            updateTime: undefined,
+            updateLocation: undefined,
+            operationId: undefined,
+          },
+        };
+      }
+    }
     setState((current) => {
+      if (saved.calendar) {
+        const currentAccount = current.accounts.find((account) => account.id === saved.calendar?.accountId);
+        if (!currentAccount || !isCalendarAccount(currentAccount) || !currentAccount.calendarEnabled) return current;
+      }
       const exists = current.events.some((item) => item.id === event.id);
-      const events = exists ? current.events.map((item) => item.id === event.id ? event : item) : [...current.events, event];
+      const events = exists ? current.events.map((item) => item.id === event.id ? saved : item) : [...current.events, saved];
       return { ...current, events: events.sort((left, right) => left.startsAt.localeCompare(right.startsAt)) };
     });
     setEventEditor(null);
-  }, []);
+  }, [state.accounts]);
 
-  const deleteEvent = useCallback((id: string) => {
-    setState((current) => ({ ...current, events: current.events.filter((event) => event.id !== id) }));
+  const deleteEvent = useCallback(async (event: CalendarEvent) => {
+    if (event.calendar?.remoteId) {
+      await deleteRemoteCalendarEvent({ provider: event.calendar.provider, accountId: event.calendar.accountId, remoteId: event.calendar.remoteId, version: event.calendar.version });
+      calendarMutationVersion += 1;
+    }
+    setState((current) => ({ ...current, events: current.events.filter((item) => item.id !== event.id) }));
     setEventEditor(null);
   }, []);
 
@@ -1071,7 +1322,7 @@ export default function App() {
 
   const page = useMemo(() => {
     if (view === "tasks") return <TasksView state={state} setState={setState} onAdd={() => setAdding(true)} />;
-    if (view === "calendar") return <CalendarView events={state.events} onAdd={openNewEvent} onEdit={openEvent} />;
+    if (view === "calendar") return <CalendarView state={state} setState={setState} onAdd={openNewEvent} onEdit={openEvent} />;
     if (view === "mail") return <MailView state={state} setState={setState} searchQuery={searchQuery} />;
     if (view === "widgets") return <WidgetsView />;
     return <TodayView state={state} setState={setState} onAddTask={() => setAdding(true)} onAddEvent={openNewEvent} onEditEvent={openEvent} />;
@@ -1085,10 +1336,11 @@ export default function App() {
       {sidebarOpen ? <button className="sidebar-scrim" onClick={() => setSidebarOpen(false)} aria-label="Закрыть меню" /> : null}
       <div className="app-content">
         <header className="topbar"><button className="icon-button menu-button" onClick={() => setSidebarOpen(true)}><Menu size={20} /></button><div className="search-box"><Search size={18} /><input ref={searchInput} value={searchQuery} aria-label="Поиск писем" maxLength={200} placeholder="Найти письмо…" onChange={(event) => { setSearchQuery(event.target.value); if (event.target.value.trim()) setView("mail"); }} />{searchQuery ? <button className="search-clear" onClick={() => setSearchQuery("")} aria-label="Очистить поиск"><X size={15} /></button> : <kbd>Ctrl K</kbd>}</div><div className="top-actions"><button className="icon-button notification-button"><Bell size={19} /><i /></button><button className="primary-button quick-add" onClick={() => setAdding(true)}><Plus size={18} />Добавить</button></div></header>
+        {persistenceError || reminderError ? <div className="runtime-error" role="alert">{persistenceError || reminderError}</div> : null}
         <main className="content-area">{page}</main>
       </div>
       {adding ? <AddTask onAdd={addTask} onClose={() => setAdding(false)} /> : null}
-      {eventEditor ? <EventEditor existing={eventEditor === "new" ? undefined : eventEditor} onSave={saveEvent} onDelete={deleteEvent} onClose={() => setEventEditor(null)} /> : null}
+      {eventEditor ? <EventEditor existing={eventEditor === "new" ? undefined : eventEditor} accounts={state.accounts} onSave={saveEvent} onDelete={deleteEvent} onClose={() => setEventEditor(null)} /> : null}
       {settingsOpen ? <SettingsModal onClose={() => setSettingsOpen(false)} /> : null}
     </div>
   );
