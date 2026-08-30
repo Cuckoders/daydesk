@@ -1,6 +1,6 @@
 # DayDesk Sync Server
 
-Локальный sync-сервис для обмена задачами между DayDesk Mobile и будущим desktop-клиентом.
+Локальный sync-сервис для обмена задачами между DayDesk Desktop и DayDesk Mobile.
 
 ## Запуск
 

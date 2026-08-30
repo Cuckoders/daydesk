@@ -6,6 +6,7 @@ mod mail;
 mod mail_cache;
 mod oauth;
 mod reminders;
+mod sync;
 
 use tauri::Manager;
 
@@ -63,7 +64,11 @@ pub fn run() {
             lifecycle::quit_daydesk,
             calendar::sync_calendar,
             calendar::upsert_calendar_event,
-            calendar::delete_calendar_event
+            calendar::delete_calendar_event,
+            sync::sync_device_status,
+            sync::register_sync_device,
+            sync::exchange_sync_changes,
+            sync::disconnect_sync_device
         ])
         .build(tauri::generate_context!())
         .expect("не удалось собрать DayDesk");

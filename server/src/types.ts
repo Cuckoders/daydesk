@@ -1,6 +1,12 @@
 export type EntityType = 'task';
 export type SyncOperationType = 'upsert' | 'delete';
 
+export interface DesktopTaskRecurrence {
+  mode: 'daily' | 'weekdays' | 'weekly' | 'custom';
+  days: number[];
+  seriesId: string;
+}
+
 export interface SyncedTask {
   id: string;
   title: string;
@@ -11,6 +17,8 @@ export interface SyncedTask {
   reminderEnabled: boolean;
   remindBeforeMinutes: number;
   recurrence: 'none' | 'daily' | 'weekdays' | 'weekly';
+  desktopRecurrence?: DesktopTaskRecurrence;
+  snoozedUntil?: string;
   updatedAt: string;
   syncVersion: number;
 }

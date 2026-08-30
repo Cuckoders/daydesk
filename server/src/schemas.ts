@@ -27,6 +27,17 @@ const taskPayload = {
     reminderEnabled: { type: 'boolean' },
     remindBeforeMinutes: { type: 'integer', minimum: 0, maximum: 10080 },
     recurrence: { type: 'string', enum: ['none', 'daily', 'weekdays', 'weekly'] },
+    desktopRecurrence: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['mode', 'days', 'seriesId'],
+      properties: {
+        mode: { type: 'string', enum: ['daily', 'weekdays', 'weekly', 'custom'] },
+        days: { type: 'array', maxItems: 7, uniqueItems: true, items: { type: 'integer', minimum: 0, maximum: 6 } },
+        seriesId: identifier,
+      },
+    },
+    snoozedUntil: isoDate,
     updatedAt: isoDate,
     syncVersion: { type: 'integer', minimum: 1, maximum: 2147483647 },
   },

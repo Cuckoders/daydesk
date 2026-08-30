@@ -2,6 +2,12 @@ export type Priority = 'high' | 'medium' | 'low';
 
 export type TaskRecurrenceMode = 'none' | 'daily' | 'weekdays' | 'weekly';
 
+export interface DesktopTaskRecurrence {
+  mode: 'daily' | 'weekdays' | 'weekly' | 'custom';
+  days: number[];
+  seriesId: string;
+}
+
 export interface Task {
   id: string;
   title: string;
@@ -12,6 +18,8 @@ export interface Task {
   reminderEnabled: boolean;
   remindBeforeMinutes: number;
   recurrence: TaskRecurrenceMode;
+  desktopRecurrence?: DesktopTaskRecurrence;
+  snoozedUntil?: string;
   notificationId?: string;
   updatedAt: string;
   syncVersion: number;

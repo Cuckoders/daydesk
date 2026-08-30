@@ -5,7 +5,7 @@ import { createJSONStorage, persist } from 'zustand/middleware';
 import { initialState } from '@/src/data';
 import { cancelReminder, scheduleRoutineReminder, scheduleTaskReminder } from '@/src/services/notifications';
 import type { DayDeskState, NewTaskInput, RemoteSyncChange, Routine, SyncStatus, Task } from '@/src/types';
-import { nextDueDate } from '@/src/utils/date';
+import { nextDueDate, nextDueDateForDays } from '@/src/utils/date';
 
 interface DayDeskActions {
   addTask: (input: NewTaskInput) => Promise<Task>;
@@ -15,7 +15,7 @@ interface DayDeskActions {
   toggleRoutine: (id: string) => Promise<void>;
   enableAllRoutines: () => Promise<void>;
   setSyncStatus: (status: SyncStatus, error?: string) => void;
-  queueAllTasksForSync: () => void;
+  queueTasksForSync: (taskIds: string[]) => void;
   applySyncResult: (changes: RemoteSyncChange[], acceptedOperationIds: string[], cursor: number, serverTime: string) => Promise<void>;
   markHydrated: () => void;
 }
@@ -23,6 +23,7 @@ interface DayDeskActions {
 type DayDeskStore = DayDeskState & DayDeskActions;
 
 const id = (prefix: string) => `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+const recurringTaskId = (seriesId: string, dueAt: string) => `repeat-${seriesId.slice(0, 100)}-${new Date(dueAt).getTime().toString(36)}`;
 
 const queueOperation = (entityId: string, operation: 'upsert' | 'delete') => ({
   id: id('sync'),
@@ -42,10 +43,12 @@ export const useDayDeskStore = create<DayDeskStore>()(
     (set, get) => ({
       ...initialState,
       addTask: async (input) => {
+        const taskId = id('task');
         const task: Task = {
           ...input,
-          id: id('task'),
+          id: taskId,
           completed: false,
+          desktopRecurrence: input.recurrence === 'none' ? undefined : { mode: input.recurrence, days: [], seriesId: taskId },
           updatedAt: new Date().toISOString(),
           syncVersion: 1,
         };
@@ -63,6 +66,11 @@ export const useDayDeskStore = create<DayDeskStore>()(
         const updated: Task = {
           ...current,
           ...input,
+          desktopRecurrence: input.recurrence === 'none'
+            ? input.recurrence === current.recurrence ? current.desktopRecurrence : undefined
+            : input.recurrence === current.recurrence && current.desktopRecurrence
+              ? current.desktopRecurrence
+              : { mode: input.recurrence, days: [], seriesId: current.desktopRecurrence?.seriesId ?? current.id },
           updatedAt: new Date().toISOString(),
           syncVersion: current.syncVersion + 1,
           notificationId: undefined,
@@ -86,12 +94,20 @@ export const useDayDeskStore = create<DayDeskStore>()(
           syncVersion: current.syncVersion + 1,
         };
         const additions: Task[] = [];
-        if (completed && current.recurrence !== 'none') {
+        const nextRecurringDueAt = current.desktopRecurrence?.mode === 'custom'
+          ? nextDueDateForDays(current.dueAt, current.desktopRecurrence.days)
+          : current.recurrence !== 'none'
+            ? nextDueDate(current.dueAt, current.recurrence)
+            : undefined;
+        const seriesId = current.desktopRecurrence?.seriesId ?? current.id;
+        const nextTaskId = nextRecurringDueAt ? recurringTaskId(seriesId, nextRecurringDueAt) : undefined;
+        if (completed && nextRecurringDueAt && nextTaskId && !get().tasks.some((task) => task.id === nextTaskId)) {
           const repeated: Task = {
             ...current,
-            id: id('task'),
+            id: nextTaskId,
             completed: false,
-            dueAt: nextDueDate(current.dueAt, current.recurrence),
+            dueAt: nextRecurringDueAt,
+            desktopRecurrence: current.desktopRecurrence ?? (current.recurrence === 'none' ? undefined : { mode: current.recurrence, days: [], seriesId }),
             notificationId: undefined,
             updatedAt: new Date().toISOString(),
             syncVersion: 1,
@@ -135,12 +151,15 @@ export const useDayDeskStore = create<DayDeskStore>()(
         set({ routines });
       },
       setSyncStatus: (syncStatus, syncError) => set({ syncStatus, ...(syncError ? { syncError } : { syncError: undefined }) }),
-      queueAllTasksForSync: () => set((state) => ({
-        syncQueue: state.tasks.reduce(
-          (queue, task) => enqueueLatest(queue, queueOperation(task.id, 'upsert')),
-          state.syncQueue,
-        ),
-      })),
+      queueTasksForSync: (taskIds) => set((state) => {
+        const selected = new Set(taskIds);
+        return {
+          syncQueue: state.tasks.filter((task) => selected.has(task.id)).reduce(
+            (queue, task) => enqueueLatest(queue, queueOperation(task.id, 'upsert')),
+            state.syncQueue,
+          ),
+        };
+      }),
       applySyncResult: async (changes, acceptedOperationIds, syncCursor, serverTime) => {
         const accepted = new Set(acceptedOperationIds);
         const remindersToCancel: string[] = [];

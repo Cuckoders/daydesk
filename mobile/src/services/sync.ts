@@ -43,6 +43,13 @@ function isRemoteChange(value: unknown): value is RemoteSyncChange {
   if (value.operation === 'delete') return true;
   if (value.operation !== 'upsert' || !isRecord(value.payload)) return false;
   const payload = value.payload;
+  const desktopRecurrence = payload.desktopRecurrence;
+  const recurrenceIsValid = desktopRecurrence === undefined || (isRecord(desktopRecurrence)
+    && ['daily', 'weekdays', 'weekly', 'custom'].includes(String(desktopRecurrence.mode))
+    && Array.isArray(desktopRecurrence.days)
+    && desktopRecurrence.days.length <= 7
+    && desktopRecurrence.days.every((day) => Number.isInteger(day) && Number(day) >= 0 && Number(day) <= 6)
+    && typeof desktopRecurrence.seriesId === 'string');
   return typeof payload.id === 'string'
     && typeof payload.title === 'string'
     && typeof payload.completed === 'boolean'
@@ -52,6 +59,8 @@ function isRemoteChange(value: unknown): value is RemoteSyncChange {
     && typeof payload.reminderEnabled === 'boolean'
     && Number.isInteger(payload.remindBeforeMinutes)
     && ['none', 'daily', 'weekdays', 'weekly'].includes(String(payload.recurrence))
+    && recurrenceIsValid
+    && (payload.snoozedUntil === undefined || typeof payload.snoozedUntil === 'string')
     && typeof payload.updatedAt === 'string'
     && Number.isInteger(payload.syncVersion);
 }
@@ -133,6 +142,7 @@ export async function registerSyncDevice(apiUrlInput: string, setupCode: string,
     SecureStore.setItemAsync(DEVICE_TOKEN_KEY, device.token),
     SecureStore.setItemAsync(DEVICE_NAME_KEY, deviceName.trim()),
   ]);
+  useDayDeskStore.setState({ syncCursor: 0 });
   return device;
 }
 
@@ -145,6 +155,11 @@ async function performSync() {
   try {
     let hasMore = true;
     let rounds = 0;
+    const initialState = useDayDeskStore.getState();
+    const initialReconciliation = initialState.syncCursor === 0;
+    const initialTaskIds = initialState.tasks.map((task) => task.id);
+    const remoteEntityIds = new Set<string>();
+    let reconciled = false;
     while (hasMore && rounds < 20) {
       rounds += 1;
       const state = useDayDeskStore.getState();
@@ -169,14 +184,16 @@ async function performSync() {
         },
         body: JSON.stringify({ cursor: state.syncCursor, changes }),
       }));
+      response.changes.forEach((change) => remoteEntityIds.add(change.entityId));
       await useDayDeskStore.getState().applySyncResult(
         response.changes,
         response.acceptedOperationIds,
         response.cursor,
         response.serverTime,
       );
-      if (rounds === 1 && state.syncCursor === 0 && operations.length === 0 && response.changes.length === 0) {
-        useDayDeskStore.getState().queueAllTasksForSync();
+      if (initialReconciliation && !response.hasMore && !reconciled) {
+        useDayDeskStore.getState().queueTasksForSync(initialTaskIds.filter((taskId) => !remoteEntityIds.has(taskId)));
+        reconciled = true;
       }
       hasMore = response.hasMore || useDayDeskStore.getState().syncQueue.length > 0;
     }
@@ -216,5 +233,5 @@ export async function disconnectSyncDevice() {
       SecureStore.deleteItemAsync(DEVICE_NAME_KEY),
     ]);
   }
-  useDayDeskStore.getState().setSyncStatus('idle');
+  useDayDeskStore.setState({ syncCursor: 0, syncQueue: [], syncStatus: 'idle', syncError: undefined, lastSyncedAt: undefined });
 }

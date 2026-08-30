@@ -48,6 +48,18 @@ export function nextDueDate(dueAt: string, recurrence: 'daily' | 'weekdays' | 'w
   return next.toISOString();
 }
 
+export function nextDueDateForDays(dueAt: string, days: number[]) {
+  if (days.length === 0) return undefined;
+  const due = new Date(dueAt);
+  const threshold = Math.max(due.getTime(), Date.now());
+  for (let offset = 1; offset <= 370; offset += 1) {
+    const candidate = new Date(due);
+    candidate.setDate(due.getDate() + offset);
+    if (candidate.getTime() > threshold && days.includes(candidate.getDay())) return candidate.toISOString();
+  }
+  return undefined;
+}
+
 export function timeUntil(value: string) {
   const diff = new Date(value).getTime() - Date.now();
   if (diff <= 0) return 'срок прошёл';

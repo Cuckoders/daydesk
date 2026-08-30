@@ -47,9 +47,19 @@ import { loadMailCache, replaceMailCache, searchMailCache } from "./services/mai
 import { connectOAuth, disconnectOAuth, downloadOAuthAttachment, getOAuthMessageContent, getOAuthProviderStatus, syncOAuth, type OAuthProvider, type OAuthProviderStatus } from "./services/oauth";
 import { deleteRemoteCalendarEvent, syncRemoteCalendar, toCalendarEvent, upsertRemoteCalendarEvent } from "./services/calendar";
 import { loadState, saveState, stateChannel } from "./services/storage";
+import {
+  disconnectDesktopSyncDevice,
+  getDesktopSyncStatus,
+  mergeRemoteTaskChanges,
+  recordTaskChanges,
+  registerDesktopSyncDevice,
+  syncDesktopTasks,
+  type SyncDeviceStatus,
+} from "./services/sync";
 import type { AppState, CalendarEvent, MailAccount, MailAttachment, MailMessage, Routine, RoutineKind, Task, TaskRecurrenceMode } from "./types";
 
 type View = "today" | "tasks" | "calendar" | "mail" | "widgets";
+type TaskSyncPhase = "idle" | "syncing" | "error";
 
 const navItems: { id: View; label: string; icon: typeof LayoutDashboard }[] = [
   { id: "today", label: "Сегодня", icon: LayoutDashboard },
@@ -63,6 +73,7 @@ const shortTime = (iso: string) => new Intl.DateTimeFormat("ru-RU", { hour: "2-d
 const longDate = (date: Date) => new Intl.DateTimeFormat("ru-RU", { weekday: "long", day: "numeric", month: "long" }).format(date);
 const weekday = (date: Date) => new Intl.DateTimeFormat("ru-RU", { weekday: "short" }).format(date).replace(".", "");
 const uid = () => crypto.randomUUID?.() ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+const recurringTaskId = (seriesId: string, dueAt: string) => `repeat-${seriesId.slice(0, 100)}-${new Date(dueAt).getTime().toString(36)}`;
 const sameDay = (left: Date, right: Date) => left.getFullYear() === right.getFullYear() && left.getMonth() === right.getMonth() && left.getDate() === right.getDate();
 const localDateKey = (date: Date) => `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
 const eventOccursOnDate = (event: CalendarEvent, date: Date) => {
@@ -202,7 +213,7 @@ const toggleTaskCompletion = (current: AppState, id: string): AppState => {
   if (task.recurrence && nextDueAt) {
     const alreadyExists = tasks.some((item) => !item.completed && item.recurrence?.seriesId === task.recurrence?.seriesId);
     if (!alreadyExists) {
-      tasks = [...tasks, { ...task, id: uid(), dueAt: nextDueAt, completed: false, snoozedUntil: undefined }];
+      tasks = [...tasks, { ...task, id: recurringTaskId(task.recurrence.seriesId, nextDueAt), dueAt: nextDueAt, completed: false, snoozedUntil: undefined }];
     }
   }
   return { ...current, tasks: tasks.sort((left, right) => left.dueAt.localeCompare(right.dueAt)) };
@@ -279,7 +290,7 @@ function Logo() {
   );
 }
 
-function Sidebar({ view, onChange, open, onClose, onSettings, unreadCount }: { view: View; onChange: (view: View) => void; open: boolean; onClose: () => void; onSettings: () => void; unreadCount: number }) {
+function Sidebar({ view, onChange, open, onClose, onSettings, unreadCount, syncLabel }: { view: View; onChange: (view: View) => void; open: boolean; onClose: () => void; onSettings: () => void; unreadCount: number; syncLabel: string }) {
   return (
     <aside className={`sidebar ${open ? "sidebar-open" : ""}`}>
       <div className="brand"><Logo /><span>DayDesk</span><button className="icon-button sidebar-close" onClick={onClose}><X size={19} /></button></div>
@@ -300,18 +311,30 @@ function Sidebar({ view, onChange, open, onClose, onSettings, unreadCount }: { v
         <button className="add-list"><Plus size={16} />Новый список</button>
       </div>
       <div className="sidebar-bottom">
-        <div className="mini-profile"><div className="avatar">О</div><div><strong>Олег</strong><span>Всё синхронизировано</span></div><MoreHorizontal size={18} /></div>
+        <div className="mini-profile"><div className="avatar">О</div><div><strong>Олег</strong><span>{syncLabel}</span></div><MoreHorizontal size={18} /></div>
         <button onClick={onSettings}><Settings size={18} />Настройки</button>
       </div>
     </aside>
   );
 }
 
-function SettingsModal({ onClose }: { onClose: () => void }) {
+function SettingsModal({ onClose, syncDevice, syncPhase, syncError, lastSyncedAt, onConnectSync, onSyncNow, onDisconnectSync }: {
+  onClose: () => void;
+  syncDevice?: SyncDeviceStatus;
+  syncPhase: TaskSyncPhase;
+  syncError: string;
+  lastSyncedAt?: string;
+  onConnectSync: (apiUrl: string, setupCode: string, deviceName: string) => Promise<void>;
+  onSyncNow: () => Promise<void>;
+  onDisconnectSync: () => Promise<void>;
+}) {
   const [autostart, setAutostart] = useState(false);
   const [loading, setLoading] = useState(true);
   const [working, setWorking] = useState(false);
   const [error, setError] = useState("");
+  const [apiUrl, setApiUrl] = useState("http://127.0.0.1:4310");
+  const [setupCode, setSetupCode] = useState("");
+  const [deviceName, setDeviceName] = useState("DayDesk Desktop");
 
   useEffect(() => {
     let active = true;
@@ -336,6 +359,45 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
     }
   };
 
+  const connectSync = async (event: FormEvent) => {
+    event.preventDefault();
+    setWorking(true);
+    setError("");
+    try {
+      await onConnectSync(apiUrl, setupCode, deviceName);
+      setSetupCode("");
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Не удалось подключить синхронизацию");
+    } finally {
+      setWorking(false);
+    }
+  };
+
+  const runSync = async () => {
+    setWorking(true);
+    setError("");
+    try {
+      await onSyncNow();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Не удалось синхронизировать задачи");
+    } finally {
+      setWorking(false);
+    }
+  };
+
+  const disconnectSync = async () => {
+    if (!window.confirm("Отключить это устройство от синхронизации DayDesk?")) return;
+    setWorking(true);
+    setError("");
+    try {
+      await onDisconnectSync();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Не удалось отключить синхронизацию");
+    } finally {
+      setWorking(false);
+    }
+  };
+
   return (
     <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
       <section className="settings-modal" role="dialog" aria-modal="true" aria-labelledby="settings-title">
@@ -343,8 +405,20 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
         <div className="settings-content">
           <div className="setting-row"><div className="setting-icon"><Bell size={19} /></div><div><strong>Фоновые напоминания</strong><span>После закрытия окна DayDesk остаётся в трее и продолжает следить за встречами.</span></div><span className="setting-status">Включены</span></div>
           <div className="setting-row"><div className="setting-icon"><Rocket size={19} /></div><div><strong>Запускать при входе в систему</strong><span>DayDesk запустится скрыто, чтобы напоминания работали сразу после входа в Windows или macOS.</span></div><button type="button" className={`setting-toggle ${autostart ? "active" : ""}`} role="switch" aria-checked={autostart} disabled={loading || working} onClick={() => void toggleAutostart()}><i /></button></div>
+          {syncDevice ? (
+            <div className="sync-settings-card">
+              <div className="sync-settings-head"><div className="setting-icon"><Server size={19} /></div><div><strong>Синхронизация задач подключена</strong><span>{syncDevice.deviceName} · {syncDevice.apiUrl}</span>{lastSyncedAt ? <small>Последний обмен: {new Intl.DateTimeFormat("ru-RU", { hour: "2-digit", minute: "2-digit", day: "numeric", month: "short" }).format(new Date(lastSyncedAt))}</small> : null}</div><span className={`sync-dot ${syncPhase}`} /></div>
+              <div className="sync-settings-actions"><button type="button" className="secondary-button" disabled={working || syncPhase === "syncing"} onClick={() => void runSync()}>{syncPhase === "syncing" ? <LoaderCircle className="spin" size={15} /> : <RefreshCw size={15} />}Синхронизировать</button><button type="button" className="danger-button" disabled={working || syncPhase === "syncing"} onClick={() => void disconnectSync()}><Trash2 size={15} />Отключить</button></div>
+            </div>
+          ) : (
+            <form className="sync-settings-card sync-connect-form" onSubmit={connectSync}>
+              <div className="sync-settings-head"><div className="setting-icon"><Server size={19} /></div><div><strong>Общие задачи на всех устройствах</strong><span>Подключите настольный DayDesk к тому же серверу, что и мобильное приложение.</span></div></div>
+              <div className="sync-fields"><label>Адрес сервера<input type="url" required maxLength={500} autoComplete="url" value={apiUrl} onChange={(event) => setApiUrl(event.target.value)} placeholder="https://sync.example.com" /></label><label>Название устройства<input required maxLength={80} autoComplete="off" value={deviceName} onChange={(event) => setDeviceName(event.target.value)} /></label><label className="field-full">Setup-код<input type="password" required minLength={12} maxLength={256} autoComplete="one-time-code" value={setupCode} onChange={(event) => setSetupCode(event.target.value)} placeholder="Код из настроек сервера" /></label></div>
+              <button className="primary-button" type="submit" disabled={working}>{working ? <LoaderCircle className="spin" size={15} /> : <LockKeyhole size={15} />}Подключить безопасно</button>
+            </form>
+          )}
           <div className="background-note"><ShieldCheck size={18} /><span>Полный выход доступен через меню иконки DayDesk в системном трее. Обычное закрытие окна безопасно сворачивает приложение в фон.</span></div>
-          {error ? <div className="form-error" role="alert">{error}</div> : null}
+          {error || syncError ? <div className="form-error" role="alert">{error || syncError}</div> : null}
         </div>
         <footer className="settings-footer"><button className="danger-button" onClick={() => void quitDayDesk()}><Power size={16} />Выйти полностью</button><button className="primary-button" onClick={onClose}>Готово</button></footer>
       </section>
@@ -1379,9 +1453,15 @@ export default function App() {
   const [searchQuery, setSearchQuery] = useState("");
   const [mailCacheReady, setMailCacheReady] = useState(false);
   const [reminderScheduleTick, setReminderScheduleTick] = useState(0);
+  const [syncDevice, setSyncDevice] = useState<SyncDeviceStatus>();
+  const [syncPhase, setSyncPhase] = useState<TaskSyncPhase>("idle");
+  const [syncError, setSyncError] = useState("");
+  const [lastSyncedAt, setLastSyncedAt] = useState<string>();
   const searchInput = useRef<HTMLInputElement>(null);
   const mailSyncRunning = useRef(false);
   const calendarSyncRunning = useRef(false);
+  const latestTasks = useRef(state.tasks);
+  const taskSnapshot = useRef(state.tasks);
   const mailAccountsKey = state.accounts
     .map((account) => [account.id, account.provider, account.authType, account.address, account.imapHost ?? "", account.imapPort ?? ""].join(":"))
     .join("|");
@@ -1390,10 +1470,74 @@ export default function App() {
     .map((account) => [account.id, account.provider, account.calendarEnabled ? "on" : "off"].join(":"))
     .join("|");
 
+  latestTasks.current = state.tasks;
+
+  const runTaskSync = useCallback(async () => {
+    if (isWidget) return;
+    setSyncPhase("syncing");
+    setSyncError("");
+    try {
+      const result = await syncDesktopTasks(latestTasks.current);
+      if (!result) {
+        setSyncPhase("idle");
+        return;
+      }
+      if (result.changes.length > 0) {
+        setState((current) => {
+          const tasks = mergeRemoteTaskChanges(current.tasks, result.changes);
+          taskSnapshot.current = tasks;
+          return { ...current, tasks };
+        });
+      }
+      setLastSyncedAt(result.serverTime);
+      setSyncPhase("idle");
+    } catch (reason) {
+      const message = reason instanceof Error ? reason.message : "Не удалось синхронизировать задачи";
+      setSyncError(message);
+      setSyncPhase("error");
+      throw reason;
+    }
+  }, [isWidget]);
+
+  const connectTaskSync = useCallback(async (apiUrl: string, setupCode: string, deviceName: string) => {
+    const device = await registerDesktopSyncDevice(apiUrl, setupCode, deviceName);
+    setSyncDevice(device);
+    await runTaskSync();
+  }, [runTaskSync]);
+
+  const disconnectTaskSync = useCallback(async () => {
+    await disconnectDesktopSyncDevice();
+    setSyncDevice(undefined);
+    setSyncPhase("idle");
+    setSyncError("");
+    setLastSyncedAt(undefined);
+  }, []);
+
   useEffect(() => {
     setPersistenceError(saveState(state) ?? "");
     stateChannel?.postMessage({ ...state, messages: [] });
   }, [state]);
+
+  useEffect(() => {
+    if (isWidget) return;
+    recordTaskChanges(taskSnapshot.current, state.tasks);
+    taskSnapshot.current = state.tasks;
+  }, [isWidget, state.tasks]);
+
+  useEffect(() => {
+    if (isWidget) return;
+    let cancelled = false;
+    void getDesktopSyncStatus()
+      .then((device) => { if (!cancelled) setSyncDevice(device); })
+      .catch((reason: unknown) => { if (!cancelled) setSyncError(reason instanceof Error ? reason.message : "Не удалось проверить синхронизацию"); });
+    const initialTimer = window.setTimeout(() => void runTaskSync().catch(() => undefined), 5_000);
+    const interval = window.setInterval(() => void runTaskSync().catch(() => undefined), 30_000);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(initialTimer);
+      window.clearInterval(interval);
+    };
+  }, [isWidget, runTaskSync]);
 
   useEffect(() => {
     if (isWidget) return;
@@ -1652,7 +1796,7 @@ export default function App() {
 
   return (
     <div className="app-shell">
-      <Sidebar view={view} onChange={setView} open={sidebarOpen} onClose={() => setSidebarOpen(false)} onSettings={() => { setSettingsOpen(true); setSidebarOpen(false); }} unreadCount={state.messages.filter((message) => message.unread).length} />
+      <Sidebar view={view} onChange={setView} open={sidebarOpen} onClose={() => setSidebarOpen(false)} onSettings={() => { setSettingsOpen(true); setSidebarOpen(false); }} unreadCount={state.messages.filter((message) => message.unread).length} syncLabel={syncPhase === "syncing" ? "Синхронизация…" : syncPhase === "error" ? "Ошибка синхронизации" : syncDevice ? "Задачи синхронизированы" : "Только на этом устройстве"} />
       {sidebarOpen ? <button className="sidebar-scrim" onClick={() => setSidebarOpen(false)} aria-label="Закрыть меню" /> : null}
       <div className="app-content">
         <header className="topbar"><button className="icon-button menu-button" onClick={() => setSidebarOpen(true)}><Menu size={20} /></button><div className="search-box"><Search size={18} /><input ref={searchInput} value={searchQuery} aria-label="Поиск писем" maxLength={200} placeholder="Найти письмо…" onChange={(event) => { setSearchQuery(event.target.value); if (event.target.value.trim()) setView("mail"); }} />{searchQuery ? <button className="search-clear" onClick={() => setSearchQuery("")} aria-label="Очистить поиск"><X size={15} /></button> : <kbd>Ctrl K</kbd>}</div><div className="top-actions"><button className="icon-button notification-button"><Bell size={19} /><i /></button><button className="primary-button quick-add" onClick={openNewTask}><Plus size={18} />Добавить</button></div></header>
@@ -1661,7 +1805,7 @@ export default function App() {
       </div>
       {taskEditor ? <TaskEditor existing={taskEditor === "new" ? undefined : taskEditor} onSave={saveTask} onDelete={deleteTask} onClose={() => setTaskEditor(null)} /> : null}
       {eventEditor ? <EventEditor existing={eventEditor === "new" ? undefined : eventEditor} accounts={state.accounts} onSave={saveEvent} onDelete={deleteEvent} onClose={() => setEventEditor(null)} /> : null}
-      {settingsOpen ? <SettingsModal onClose={() => setSettingsOpen(false)} /> : null}
+      {settingsOpen ? <SettingsModal onClose={() => setSettingsOpen(false)} syncDevice={syncDevice} syncPhase={syncPhase} syncError={syncError} lastSyncedAt={lastSyncedAt} onConnectSync={connectTaskSync} onSyncNow={runTaskSync} onDisconnectSync={disconnectTaskSync} /> : null}
     </div>
   );
 }

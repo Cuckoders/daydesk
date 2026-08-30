@@ -36,6 +36,8 @@ function task(id: string, updatedAt: string) {
     reminderEnabled: true,
     remindBeforeMinutes: 10,
     recurrence: 'none',
+    desktopRecurrence: { mode: 'custom', days: [1, 3, 5], seriesId: 'series-workdays' },
+    snoozedUntil: '2026-09-01T08:50:00.000Z',
     updatedAt,
     syncVersion: 1,
   };
@@ -92,6 +94,8 @@ test('authenticated devices exchange changes and duplicate operations are idempo
   });
   assert.equal(pull.statusCode, 200);
   assert.equal(pull.json().data.changes[0].payload.title, 'Синхронизированная задача');
+  assert.deepEqual(pull.json().data.changes[0].payload.desktopRecurrence.days, [1, 3, 5]);
+  assert.equal(pull.json().data.changes[0].payload.snoozedUntil, '2026-09-01T08:50:00.000Z');
 });
 
 test('newer updates win and tombstones propagate', async () => {

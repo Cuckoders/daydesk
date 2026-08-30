@@ -30,6 +30,10 @@ function validateChange(change: ClientChange) {
       throw new TypeError('Change payload does not match its envelope');
     }
     if (!isValidIsoDate(change.payload.dueAt)) throw new TypeError('Invalid task due date');
+    if (change.payload.snoozedUntil && !isValidIsoDate(change.payload.snoozedUntil)) throw new TypeError('Invalid task snooze date');
+    if (change.payload.desktopRecurrence?.mode === 'custom' && change.payload.desktopRecurrence.days.length === 0) {
+      throw new TypeError('Custom recurrence requires at least one day');
+    }
   }
 }
 
