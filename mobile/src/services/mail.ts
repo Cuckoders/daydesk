@@ -2,6 +2,7 @@ import { Directory, File, Paths } from 'expo-file-system';
 import * as Sharing from 'expo-sharing';
 
 import { authenticatedRequest } from '@/src/services/sync';
+import { recordMailSnapshot } from '@/src/services/mail-checkpoint';
 import type { IncomingMailAttachment, MailAccount, MailContent, MailFolder, MailMessage, OutgoingMailAttachment, OutgoingMailInput } from '@/src/types';
 
 export type OAuthMailProvider = 'gmail' | 'outlook';
@@ -79,9 +80,11 @@ export async function connectImap(input: ConnectImapInput) {
   return { account: readAccount(data.account), messages: data.messages.map(readMessage) };
 }
 
-export async function synchronizeMail(accountId?: string, folder: MailFolder = 'inbox') {
+export async function synchronizeMail(accountId?: string, folder: MailFolder = 'inbox', trackSeen = true) {
   if (accountId && !uuidPattern.test(accountId)) throw new Error('Некорректный аккаунт');
-  return readSnapshot(await authenticatedRequest<unknown>('/v1/mail/sync', { method: 'POST', body: JSON.stringify({ ...(accountId ? { accountId } : {}), folder }) }));
+  const snapshot = readSnapshot(await authenticatedRequest<unknown>('/v1/mail/sync', { method: 'POST', body: JSON.stringify({ ...(accountId ? { accountId } : {}), folder }) }));
+  if (trackSeen && folder === 'inbox') await recordMailSnapshot(snapshot.messages, snapshot.accounts, !accountId);
+  return snapshot;
 }
 
 export async function loadMailAccounts() {

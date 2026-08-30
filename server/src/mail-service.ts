@@ -235,7 +235,7 @@ function createImapTransport(config: ServerConfig): MailTransport {
           return {
             id: String(message.uid), accountId: connection.account.id, sender: folder === 'sent' ? recipientName(message) : senderName(message),
             subject: message.envelope?.subject?.trim().replace(/[\u0000-\u001f\u007f]/g, '').slice(0, 1_000) || 'Без темы',
-            preview: await previewFromSource(message.source), receivedAt: new Date(message.envelope?.date ?? message.internalDate ?? Date.now()).toISOString(),
+            preview: await previewFromSource(message.source), receivedAt: new Date(message.internalDate ?? message.envelope?.date ?? Date.now()).toISOString(),
             unread: folder === 'inbox' && !message.flags?.has('\\Seen'), starred: Boolean(message.flags?.has('\\Flagged')), folder,
             ...(folder === 'inbox' && replyTo ? { replyTo } : {}),
           };

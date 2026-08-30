@@ -4,6 +4,8 @@ import * as Notifications from 'expo-notifications';
 import type { CalendarEvent, Routine, Task } from '@/src/types';
 
 const CHANNEL_ID = 'daydesk-reminders';
+const MAIL_CHANNEL_ID = 'daydesk-mail';
+const MAIL_NOTIFICATION_ID = 'daydesk-mail-summary';
 
 Notifications.setNotificationHandler({
   handleNotification: async () => ({
@@ -24,6 +26,15 @@ async function ensureChannel() {
   });
 }
 
+async function ensureMailChannel() {
+  if (Platform.OS !== 'android') return;
+  await Notifications.setNotificationChannelAsync(MAIL_CHANNEL_ID, {
+    name: 'Новая почта',
+    importance: Notifications.AndroidImportance.DEFAULT,
+    lightColor: '#167654',
+  });
+}
+
 export async function requestReminderPermission(allowRequest = true) {
   const current = await Notifications.getPermissionsAsync();
   if (current.granted) return true;
@@ -39,6 +50,28 @@ export async function cancelReminder(identifier?: string) {
 
 export async function cancelReminders(identifiers: (string | undefined)[]) {
   await Promise.all(identifiers.map((identifier) => cancelReminder(identifier)));
+}
+
+export async function notifyNewMail(count: number) {
+  if (!Number.isInteger(count) || count < 1 || count > 1_000) return undefined;
+  await ensureMailChannel();
+  return Notifications.scheduleNotificationAsync({
+    identifier: MAIL_NOTIFICATION_ID,
+    content: {
+      title: count === 1 ? 'Новое письмо в DayDesk' : `Новые письма в DayDesk · ${count}`,
+      body: 'Откройте единую почту, чтобы посмотреть обновления.',
+      data: { url: '/mail' },
+      sound: true,
+    },
+    trigger: null,
+  });
+}
+
+export async function clearNewMailNotification() {
+  await Promise.all([
+    Notifications.cancelScheduledNotificationAsync(MAIL_NOTIFICATION_ID).catch(() => undefined),
+    Notifications.dismissNotificationAsync(MAIL_NOTIFICATION_ID).catch(() => undefined),
+  ]);
 }
 
 export async function scheduleTaskReminder(task: Pick<Task, 'id' | 'title' | 'dueAt' | 'remindBeforeMinutes'>, allowPermissionRequest = true) {

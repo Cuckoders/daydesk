@@ -2,10 +2,11 @@ import { useEffect, useState } from 'react';
 import { Ionicons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
 import { useRouter } from 'expo-router';
-import { Alert, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import { Alert, Platform, Pressable, ScrollView, StyleSheet, Switch, Text, TextInput, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { disconnectSyncDevice, getSyncConfiguration, registerSyncDevice, syncNow, type SyncConfiguration } from '@/src/services/sync';
+import { disableMailBackgroundNotifications, enableMailBackgroundNotifications, getMailBackgroundState } from '@/src/services/mail-background';
 import { useDayDeskStore } from '@/src/store/useDayDeskStore';
 import { useAppColors } from '@/src/theme';
 import { formatShortDate, formatTime } from '@/src/utils/date';
@@ -22,6 +23,9 @@ export default function SyncSettingsScreen() {
   const [setupCode, setSetupCode] = useState('');
   const [deviceName, setDeviceName] = useState(Platform.OS === 'ios' ? 'Мой iPhone' : 'Мой Android');
   const [working, setWorking] = useState(false);
+  const [mailWorking, setMailWorking] = useState(false);
+  const [mailNotifications, setMailNotifications] = useState(false);
+  const [mailBackgroundAvailable, setMailBackgroundAvailable] = useState(false);
 
   useEffect(() => {
     void getSyncConfiguration().then((saved) => {
@@ -31,7 +35,20 @@ export default function SyncSettingsScreen() {
         setDeviceName(saved.deviceName);
       }
     });
+    void getMailBackgroundState().then((state) => { setMailNotifications(state.enabled); setMailBackgroundAvailable(state.available); }).catch(() => undefined);
   }, []);
+
+  const toggleMailNotifications = async (enabled: boolean) => {
+    setMailWorking(true);
+    try {
+      if (enabled) await enableMailBackgroundNotifications(); else await disableMailBackgroundNotifications();
+      setMailNotifications(enabled);
+      if (enabled) await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => undefined);
+    } catch (error) {
+      setMailNotifications((await getMailBackgroundState().catch(() => ({ enabled: false }))).enabled);
+      Alert.alert('Не удалось изменить фоновую почту', error instanceof Error ? error.message : 'Попробуйте ещё раз.');
+    } finally { setMailWorking(false); }
+  };
 
   const connect = async () => {
     setWorking(true);
@@ -62,8 +79,8 @@ export default function SyncSettingsScreen() {
       {
         text: 'Отключить',
         style: 'destructive',
-        onPress: () => void disconnectSyncDevice()
-          .then(() => setConfiguration(undefined))
+        onPress: () => void disableMailBackgroundNotifications().catch(() => undefined).then(() => disconnectSyncDevice())
+          .then(() => { setConfiguration(undefined); setMailNotifications(false); })
           .catch((error) => Alert.alert('Не удалось отключить устройство', error instanceof Error ? error.message : 'Попробуйте ещё раз.')),
       },
     ]);
@@ -130,6 +147,15 @@ export default function SyncSettingsScreen() {
               <Ionicons name="sync" size={21} color={colors.onPrimary} />
               <Text style={[styles.primaryText, { color: colors.onPrimary }]}>{working ? 'Синхронизируем…' : 'Синхронизировать сейчас'}</Text>
             </Pressable>
+            <Text style={[styles.sectionTitle, { color: colors.text }]}>Фоновая почта</Text>
+            <View style={[styles.setting, { backgroundColor: colors.surface, borderColor: colors.border }]}>
+              <View style={styles.settingCopy}>
+                <Text style={[styles.settingTitle, { color: colors.text }]}>Уведомлять о новых письмах</Text>
+                <Text style={[styles.settingText, { color: colors.textMuted }]}>{mailBackgroundAvailable ? 'Приватная проверка входящих в системном фоне' : 'Нужен development или production build на реальном устройстве'}</Text>
+              </View>
+              <Switch accessibilityLabel="Фоновые уведомления о почте" disabled={mailWorking || (!mailNotifications && !mailBackgroundAvailable)} onValueChange={(value) => void toggleMailNotifications(value)} trackColor={{ false: colors.border, true: colors.primarySoft }} thumbColor={mailNotifications ? colors.primary : colors.textMuted} value={mailNotifications} />
+            </View>
+            <Text style={[styles.backgroundNote, { color: colors.textMuted }]}>iOS и Android сами выбирают время запуска. Минимальный интервал — 15 минут; доставка не гарантируется сразу.</Text>
             <Pressable accessibilityRole="button" onPress={disconnect} style={styles.disconnectButton}>
               <Ionicons name="unlink-outline" size={19} color={colors.danger} />
               <Text style={[styles.disconnectText, { color: colors.danger }]}>Отключить устройство</Text>
@@ -215,6 +241,11 @@ const styles = StyleSheet.create({
   label: { marginTop: 14, marginBottom: 7, fontSize: 14, fontWeight: '700' },
   input: { minHeight: 54, borderWidth: StyleSheet.hairlineWidth, borderRadius: 16, paddingHorizontal: 14, fontSize: 16 },
   card: { borderWidth: StyleSheet.hairlineWidth, borderRadius: 18, padding: 14 },
+  setting: { minHeight: 82, borderWidth: StyleSheet.hairlineWidth, borderRadius: 18, padding: 14, flexDirection: 'row', alignItems: 'center', gap: 12 },
+  settingCopy: { flex: 1 },
+  settingTitle: { fontSize: 15, fontWeight: '700' },
+  settingText: { marginTop: 4, fontSize: 13, lineHeight: 18 },
+  backgroundNote: { marginTop: 9, fontSize: 12, lineHeight: 18 },
   detailRow: { minHeight: 48, flexDirection: 'row', alignItems: 'center' },
   detailCopy: { flex: 1, marginLeft: 11 },
   detailTitle: { fontSize: 16, fontWeight: '700' },

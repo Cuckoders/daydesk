@@ -12,6 +12,10 @@
       "bundleIdentifier": "com.cuckoders.daydesk"
     },
     "android": {
+      "blockedPermissions": [
+        "android.permission.READ_EXTERNAL_STORAGE",
+        "android.permission.WRITE_EXTERNAL_STORAGE"
+      ],
       "adaptiveIcon": {
         "backgroundColor": "#E6F4FE",
         "foregroundImage": "./assets/images/android-icon-foreground.png",
@@ -40,7 +44,8 @@
       "expo-notifications",
       "expo-font",
       "expo-web-browser",
-      "expo-sharing"
+      "expo-sharing",
+      "expo-background-task"
     ],
     "experiments": {
       "typedRoutes": true

@@ -5,6 +5,7 @@ import { Alert, FlatList, Pressable, RefreshControl, ScrollView, StyleSheet, Tex
 
 import { AppScreen } from '@/components/AppScreen';
 import { synchronizeMail } from '@/src/services/mail';
+import { clearNewMailNotification } from '@/src/services/notifications';
 import { useDayDeskStore } from '@/src/store/useDayDeskStore';
 import { useAppColors } from '@/src/theme';
 import type { MailFolder, MailMessage } from '@/src/types';
@@ -38,6 +39,7 @@ export default function MailScreen() {
   }, [folder, setMailSnapshot]);
 
   useFocusEffect(useCallback(() => {
+    void clearNewMailNotification();
     if (!loadedOnce) void refresh(true);
   }, [loadedOnce, refresh]));
 

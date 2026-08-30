@@ -4,6 +4,7 @@ import * as Notifications from 'expo-notifications';
 import { StatusBar } from 'expo-status-bar';
 import { useColorScheme } from 'react-native';
 import 'react-native-reanimated';
+import '@/src/services/mail-background';
 
 import { useAutoSync } from '@/src/hooks/useAutoSync';
 
