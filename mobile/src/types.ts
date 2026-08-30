@@ -68,6 +68,9 @@ export interface MailAccount {
   address: string;
   label: string;
   color: string;
+  host?: string;
+  port?: number;
+  username?: string;
   lastSyncedAt?: string;
 }
 
@@ -80,6 +83,11 @@ export interface MailMessage {
   receivedAt: string;
   unread: boolean;
   starred: boolean;
+}
+
+export interface MailContent {
+  body: string;
+  hasAttachments: boolean;
 }
 
 export interface SyncOperation {

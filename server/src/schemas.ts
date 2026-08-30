@@ -137,3 +137,46 @@ export const syncSchema = {
     },
   },
 } as const;
+
+const authenticatedHeaders = syncSchema.headers;
+const mailAccountId = { type: 'string', minLength: 36, maxLength: 36, pattern: '^[0-9a-f-]+$' } as const;
+const mailHost = { type: 'string', minLength: 1, maxLength: 253, pattern: '^(?=.{1,253}$)(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\\.)+[A-Za-z]{2,63}$' } as const;
+
+export const connectImapSchema = {
+  headers: authenticatedHeaders,
+  body: {
+    type: 'object', additionalProperties: false,
+    required: ['label', 'address', 'host', 'port', 'username', 'password'],
+    properties: {
+      label: { type: 'string', minLength: 1, maxLength: 80, pattern: '^[^\\x00-\\x1F\\x7F]+$' },
+      address: { type: 'string', format: 'email', maxLength: 320 },
+      host: mailHost,
+      port: { const: 993 },
+      username: { type: 'string', minLength: 1, maxLength: 320, pattern: '^[^\\x00-\\x1F\\x7F]+$' },
+      password: { type: 'string', minLength: 1, maxLength: 1024, pattern: '^[^\\x00]+$' },
+    },
+  },
+} as const;
+
+export const mailAccountListSchema = { headers: authenticatedHeaders } as const;
+
+export const mailSyncSchema = {
+  headers: authenticatedHeaders,
+  body: {
+    type: 'object', additionalProperties: false,
+    properties: { accountId: mailAccountId },
+  },
+} as const;
+
+export const mailAccountParamsSchema = {
+  headers: authenticatedHeaders,
+  params: { type: 'object', additionalProperties: false, required: ['accountId'], properties: { accountId: mailAccountId } },
+} as const;
+
+export const mailMessageParamsSchema = {
+  headers: authenticatedHeaders,
+  params: {
+    type: 'object', additionalProperties: false, required: ['accountId', 'messageId'],
+    properties: { accountId: mailAccountId, messageId: { type: 'string', pattern: '^[1-9][0-9]{0,19}$' } },
+  },
+} as const;

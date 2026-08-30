@@ -20,6 +20,9 @@ interface DayDeskActions {
   deleteRoutine: (id: string) => Promise<void>;
   toggleRoutine: (id: string) => Promise<void>;
   enableAllRoutines: () => Promise<void>;
+  setMailSnapshot: (accounts: DayDeskState['accounts'], messages: DayDeskState['messages']) => void;
+  removeMailAccount: (id: string) => void;
+  markMailRead: (accountId: string, id: string) => void;
   setSyncStatus: (status: SyncStatus, error?: string) => void;
   queueEntitiesForSync: (entities: { entity: SyncOperation['entity']; entityId: string }[]) => void;
   applySyncResult: (changes: RemoteSyncChange[], acceptedOperationIds: string[], cursor: number, serverTime: string) => Promise<void>;
@@ -279,6 +282,12 @@ export const useDayDeskStore = create<DayDeskStore>()(
           ),
         }));
       },
+      setMailSnapshot: (accounts, messages) => set({ accounts, messages }),
+      removeMailAccount: (accountId) => set((state) => ({
+        accounts: state.accounts.filter((account) => account.id !== accountId),
+        messages: state.messages.filter((message) => message.accountId !== accountId),
+      })),
+      markMailRead: (accountId, messageId) => set((state) => ({ messages: state.messages.map((message) => message.accountId === accountId && message.id === messageId && message.unread ? { ...message, unread: false } : message) })),
       setSyncStatus: (syncStatus, syncError) => set({ syncStatus, ...(syncError ? { syncError } : { syncError: undefined }) }),
       queueEntitiesForSync: (entities) => set((state) => ({
         syncQueue: entities.reduce(
@@ -372,17 +381,20 @@ export const useDayDeskStore = create<DayDeskStore>()(
     }),
     {
       name: 'daydesk-mobile-v1',
+      version: 2,
       storage: createJSONStorage(() => AsyncStorage),
-      partialize: ({ tasks, events, routines, accounts, messages, syncQueue, syncCursor, lastSyncedAt }) => ({
+      partialize: ({ tasks, events, routines, syncQueue, syncCursor, lastSyncedAt }) => ({
         tasks,
         events,
         routines,
-        accounts,
-        messages,
         syncQueue,
         syncCursor,
         lastSyncedAt,
       }),
+      migrate: (persistedState) => {
+        const state = persistedState as Partial<DayDeskState>;
+        return { ...state, accounts: [], messages: [] } as unknown as DayDeskStore;
+      },
       onRehydrateStorage: () => (state) => state?.markHydrated(),
     },
   ),

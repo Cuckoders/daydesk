@@ -90,3 +90,30 @@ export interface DeviceRecord {
   tokenHash: string;
   revokedAt: string | null;
 }
+
+export interface MailAccount {
+  id: string;
+  provider: 'imap';
+  label: string;
+  address: string;
+  host: string;
+  port: 993;
+  username: string;
+  lastSyncedAt?: string;
+}
+
+export interface MailMessage {
+  id: string;
+  accountId: string;
+  sender: string;
+  subject: string;
+  preview: string;
+  receivedAt: string;
+  unread: boolean;
+  starred: boolean;
+}
+
+export interface MailContent {
+  body: string;
+  hasAttachments: boolean;
+}

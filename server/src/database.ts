@@ -46,6 +46,20 @@ export function createDatabase(databasePath: string) {
     ) STRICT;
 
     CREATE INDEX IF NOT EXISTS change_log_sequence_idx ON change_log(sequence);
+
+    CREATE TABLE IF NOT EXISTS mail_accounts (
+      id TEXT PRIMARY KEY,
+      provider TEXT NOT NULL CHECK (provider = 'imap'),
+      label TEXT NOT NULL,
+      address TEXT NOT NULL,
+      host TEXT NOT NULL,
+      port INTEGER NOT NULL CHECK (port = 993),
+      username TEXT NOT NULL,
+      encrypted_password TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      last_synced_at TEXT
+    ) STRICT;
   `);
   return database;
 }

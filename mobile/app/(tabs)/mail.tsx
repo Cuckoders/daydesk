@@ -1,126 +1,89 @@
-import { useCallback } from 'react';
+import { useCallback, useMemo, useState } from 'react';
 import { Ionicons } from '@expo/vector-icons';
-import { Alert, FlatList, Pressable, StyleSheet, Text, View } from 'react-native';
+import { type Href, useFocusEffect, useRouter } from 'expo-router';
+import { Alert, FlatList, Pressable, RefreshControl, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 
 import { AppScreen } from '@/components/AppScreen';
+import { synchronizeMail } from '@/src/services/mail';
 import { useDayDeskStore } from '@/src/store/useDayDeskStore';
 import { useAppColors } from '@/src/theme';
-import type { MailMessage, MailProvider } from '@/src/types';
+import type { MailMessage } from '@/src/types';
 import { formatShortDate, formatTime, isSameDay } from '@/src/utils/date';
-
-const providers: { id: MailProvider; title: string; icon: React.ComponentProps<typeof Ionicons>['name']; color: string }[] = [
-  { id: 'gmail', title: 'Gmail', icon: 'logo-google', color: '#D7473F' },
-  { id: 'outlook', title: 'Outlook', icon: 'logo-microsoft', color: '#2672EC' },
-  { id: 'imap', title: 'Другая почта', icon: 'server-outline', color: '#167654' },
-];
 
 export default function MailScreen() {
   const colors = useAppColors();
+  const router = useRouter();
   const accounts = useDayDeskStore((state) => state.accounts);
   const messages = useDayDeskStore((state) => state.messages);
-  const connect = useCallback((provider: MailProvider) => {
-    Alert.alert(
-      'Подключение почты',
-      provider === 'imap'
-        ? 'Безопасная форма IMAP/SMTP и хранение пароля в Keychain появятся на следующем этапе.'
-        : 'OAuth-вход будет подключён к тому же серверному коннектору, который синхронизирует настольный DayDesk.',
-      [{ text: 'Понятно' }],
-    );
-  }, []);
+  const setMailSnapshot = useDayDeskStore((state) => state.setMailSnapshot);
+  const [query, setQuery] = useState('');
+  const [selectedAccount, setSelectedAccount] = useState<string>();
+  const [refreshing, setRefreshing] = useState(false);
+  const [loadedOnce, setLoadedOnce] = useState(false);
+
+  const refresh = useCallback(async (silent = false) => {
+    if (!silent) setRefreshing(true);
+    try {
+      const snapshot = await synchronizeMail();
+      setMailSnapshot(snapshot.accounts, snapshot.messages);
+      setLoadedOnce(true);
+    } catch (error) {
+      setLoadedOnce(true);
+      if (!silent) Alert.alert('Не удалось обновить почту', error instanceof Error ? error.message : 'Попробуйте ещё раз.');
+    } finally {
+      if (!silent) setRefreshing(false);
+    }
+  }, [setMailSnapshot]);
+
+  useFocusEffect(useCallback(() => {
+    if (!loadedOnce) void refresh(true);
+  }, [loadedOnce, refresh]));
+
+  const filtered = useMemo(() => {
+    const normalized = query.trim().toLocaleLowerCase('ru-RU');
+    return messages.filter((message) => (!selectedAccount || message.accountId === selectedAccount)
+      && (!normalized || [message.sender, message.subject, message.preview].some((value) => value.toLocaleLowerCase('ru-RU').includes(normalized))));
+  }, [messages, query, selectedAccount]);
+
+  const openMessage = useCallback((message: MailMessage) => router.push({
+    pathname: '/mail-reader', params: { accountId: message.accountId, messageId: message.id },
+  } as unknown as Href), [router]);
+
   const renderMessage = useCallback(({ item }: { item: MailMessage }) => (
-    <Pressable
-      accessibilityLabel={`Письмо от ${item.sender}: ${item.subject}`}
-      accessibilityRole="button"
-      android_ripple={{ color: colors.primarySoft }}
-      style={[styles.message, { backgroundColor: colors.surface, borderColor: colors.border }]}
-    >
-      <View style={[styles.avatar, { backgroundColor: colors.primarySoft }]}>
-        <Text style={[styles.avatarText, { color: colors.primary }]}>{item.sender.slice(0, 1).toUpperCase()}</Text>
-      </View>
+    <Pressable accessibilityLabel={`Письмо от ${item.sender}: ${item.subject}`} accessibilityRole="button" android_ripple={{ color: colors.primarySoft }} onPress={() => openMessage(item)} style={[styles.message, { backgroundColor: colors.surface, borderColor: colors.border }]}>
+      <View style={[styles.avatar, { backgroundColor: colors.primarySoft }]}><Text style={[styles.avatarText, { color: colors.primary }]}>{item.sender.slice(0, 1).toUpperCase()}</Text></View>
       <View style={styles.messageBody}>
-        <View style={styles.messageTop}>
-          <Text numberOfLines={1} style={[styles.sender, { color: colors.text }]}>{item.sender}</Text>
-          <Text style={[styles.messageTime, { color: colors.textMuted }]}>{isSameDay(item.receivedAt, new Date()) ? formatTime(item.receivedAt) : formatShortDate(item.receivedAt)}</Text>
-        </View>
-        <Text numberOfLines={1} style={[styles.subject, { color: colors.text }]}>{item.subject}</Text>
-        <Text numberOfLines={2} style={[styles.preview, { color: colors.textMuted }]}>{item.preview}</Text>
+        <View style={styles.messageTop}><Text numberOfLines={1} style={[styles.sender, { color: colors.text }, item.unread && styles.unreadText]}>{item.sender}</Text><Text style={[styles.messageTime, { color: colors.textMuted }]}>{isSameDay(item.receivedAt, new Date()) ? formatTime(item.receivedAt) : formatShortDate(item.receivedAt)}</Text></View>
+        <Text numberOfLines={1} style={[styles.subject, { color: colors.text }, item.unread && styles.unreadText]}>{item.subject}</Text>
+        <Text numberOfLines={2} style={[styles.preview, { color: colors.textMuted }]}>{item.preview || 'Откройте письмо, чтобы прочитать содержимое'}</Text>
       </View>
-      {item.unread ? <View accessibilityLabel="Непрочитано" style={[styles.unread, { backgroundColor: colors.primary }]} /> : null}
+      {item.starred ? <Ionicons name="star" size={16} color={colors.warning} /> : item.unread ? <View accessibilityLabel="Непрочитано" style={[styles.unread, { backgroundColor: colors.primary }]} /> : null}
     </Pressable>
-  ), [colors]);
+  ), [colors, openMessage]);
 
   return (
     <AppScreen>
       <FlatList
-        data={messages}
-        renderItem={renderMessage}
-        keyExtractor={(item) => item.id}
-        ItemSeparatorComponent={() => <View style={styles.separator} />}
-        contentContainerStyle={styles.content}
-        ListHeaderComponent={(
-          <View style={styles.header}>
-            <Text style={[styles.title, { color: colors.text }]}>Вся почта</Text>
-            <Text style={[styles.subtitle, { color: colors.textMuted }]}>{accounts.length ? `${accounts.length} аккаунта подключено` : 'Соберите входящие в одном месте'}</Text>
-            {!accounts.length ? (
-              <View style={styles.providerList}>
-                {providers.map((provider) => (
-                  <Pressable
-                    key={provider.id}
-                    accessibilityLabel={`Подключить ${provider.title}`}
-                    accessibilityRole="button"
-                    android_ripple={{ color: colors.primarySoft }}
-                    onPress={() => connect(provider.id)}
-                    style={[styles.provider, { backgroundColor: colors.surface, borderColor: colors.border }]}
-                  >
-                    <View style={[styles.providerIcon, { backgroundColor: `${provider.color}18` }]}>
-                      <Ionicons name={provider.icon} size={24} color={provider.color} />
-                    </View>
-                    <Text style={[styles.providerTitle, { color: colors.text }]}>{provider.title}</Text>
-                    <Ionicons name="add-circle-outline" size={24} color={colors.primary} />
-                  </Pressable>
-                ))}
-              </View>
-            ) : null}
-            <Text style={[styles.sectionTitle, { color: colors.text }]}>Входящие</Text>
-          </View>
-        )}
-        ListEmptyComponent={(
-          <View style={[styles.empty, { backgroundColor: colors.surfaceRaised }]}>
-            <Ionicons name="mail-open-outline" size={34} color={colors.textMuted} />
-            <Text style={[styles.emptyTitle, { color: colors.text }]}>Почта пока не подключена</Text>
-            <Text style={[styles.emptyText, { color: colors.textMuted }]}>После OAuth-входа здесь появится единый список писем Gmail, Outlook и IMAP.</Text>
-          </View>
-        )}
-        initialNumToRender={10}
-        windowSize={5}
-        showsVerticalScrollIndicator={false}
+        data={filtered} renderItem={renderMessage} keyExtractor={(item) => `${item.accountId}:${item.id}`}
+        ItemSeparatorComponent={() => <View style={styles.separator} />} contentContainerStyle={styles.content}
+        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => void refresh()} tintColor={colors.primary} colors={[colors.primary]} />}
+        ListHeaderComponent={<View style={styles.header}>
+          <View style={styles.titleRow}><View style={styles.titleCopy}><Text style={[styles.title, { color: colors.text }]}>Вся почта</Text><Text style={[styles.subtitle, { color: colors.textMuted }]}>{accounts.length ? `${accounts.length} аккаунтов · ${messages.filter((item) => item.unread).length} непрочитанных` : 'Соберите входящие в одном месте'}</Text></View><Pressable accessibilityLabel="Почтовые аккаунты" accessibilityRole="button" onPress={() => router.push('/mail-accounts' as Href)} style={[styles.settingsButton, { backgroundColor: colors.surface }]}><Ionicons name="settings-outline" size={22} color={colors.primary} /></Pressable></View>
+          <View style={[styles.search, { backgroundColor: colors.surface, borderColor: colors.border }]}><Ionicons name="search-outline" size={20} color={colors.textMuted} /><TextInput accessibilityLabel="Поиск по почте" autoCorrect={false} onChangeText={setQuery} placeholder="Отправитель, тема или текст" placeholderTextColor={colors.textMuted} returnKeyType="search" style={[styles.searchInput, { color: colors.text }]} value={query} />{query ? <Pressable accessibilityLabel="Очистить поиск" accessibilityRole="button" onPress={() => setQuery('')} style={styles.clearButton}><Ionicons name="close-circle" size={19} color={colors.textMuted} /></Pressable> : null}</View>
+          {accounts.length > 1 ? <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.filters}><Pressable accessibilityRole="radio" accessibilityState={{ checked: !selectedAccount }} onPress={() => setSelectedAccount(undefined)} style={[styles.filter, { backgroundColor: !selectedAccount ? colors.primarySoft : colors.surface, borderColor: !selectedAccount ? colors.primary : colors.border }]}><Text style={[styles.filterText, { color: !selectedAccount ? colors.primary : colors.text }]}>Все</Text></Pressable>{accounts.map((account) => <Pressable key={account.id} accessibilityRole="radio" accessibilityState={{ checked: selectedAccount === account.id }} onPress={() => setSelectedAccount(account.id)} style={[styles.filter, { backgroundColor: selectedAccount === account.id ? colors.primarySoft : colors.surface, borderColor: selectedAccount === account.id ? colors.primary : colors.border }]}><Text style={[styles.filterText, { color: selectedAccount === account.id ? colors.primary : colors.text }]}>{account.label}</Text></Pressable>)}</ScrollView> : null}
+          <Text style={[styles.sectionTitle, { color: colors.text }]}>Входящие</Text>
+        </View>}
+        ListEmptyComponent={<View style={[styles.empty, { backgroundColor: colors.surfaceRaised }]}><Ionicons name={query ? 'search-outline' : 'mail-open-outline'} size={34} color={colors.textMuted} /><Text style={[styles.emptyTitle, { color: colors.text }]}>{query ? 'Ничего не найдено' : accounts.length ? 'Входящие пусты' : 'Почта пока не подключена'}</Text><Text style={[styles.emptyText, { color: colors.textMuted }]}>{accounts.length ? 'Потяните экран вниз, чтобы обновить письма.' : 'Подключите IMAP-аккаунт через защищённый DayDesk Sync Server.'}</Text>{!accounts.length ? <Pressable accessibilityRole="button" onPress={() => router.push('/mail-accounts' as Href)} style={[styles.connectButton, { backgroundColor: colors.primary }]}><Text style={[styles.connectText, { color: colors.onPrimary }]}>Подключить почту</Text></Pressable> : null}</View>}
+        initialNumToRender={12} windowSize={7} showsVerticalScrollIndicator={false}
       />
     </AppScreen>
   );
 }
 
 const styles = StyleSheet.create({
-  content: { paddingHorizontal: 16, paddingBottom: 32 },
-  header: { paddingTop: 14, paddingBottom: 14 },
-  title: { fontSize: 32, lineHeight: 39, fontWeight: '800' },
-  subtitle: { marginTop: 3, fontSize: 15, lineHeight: 21 },
-  providerList: { gap: 9, marginTop: 20 },
-  provider: { minHeight: 66, borderWidth: StyleSheet.hairlineWidth, borderRadius: 18, paddingHorizontal: 12, flexDirection: 'row', alignItems: 'center', gap: 12, overflow: 'hidden' },
-  providerIcon: { width: 42, height: 42, borderRadius: 13, alignItems: 'center', justifyContent: 'center' },
-  providerTitle: { flex: 1, fontSize: 16, fontWeight: '700' },
-  sectionTitle: { marginTop: 22, fontSize: 20, lineHeight: 27, fontWeight: '700' },
-  message: { minHeight: 92, borderWidth: StyleSheet.hairlineWidth, borderRadius: 18, padding: 12, flexDirection: 'row', alignItems: 'center', overflow: 'hidden' },
-  avatar: { width: 44, height: 44, borderRadius: 15, alignItems: 'center', justifyContent: 'center' },
-  avatarText: { fontSize: 18, fontWeight: '800' },
-  messageBody: { flex: 1, marginLeft: 11 },
-  messageTop: { flexDirection: 'row', gap: 8 },
-  sender: { flex: 1, fontSize: 14, fontWeight: '700' },
-  messageTime: { fontSize: 12 },
-  subject: { marginTop: 2, fontSize: 14, fontWeight: '600' },
-  preview: { marginTop: 3, fontSize: 13, lineHeight: 18 },
-  unread: { width: 8, height: 8, borderRadius: 4, marginLeft: 8 },
-  separator: { height: 9 },
-  empty: { minHeight: 210, marginTop: 4, borderRadius: 22, padding: 28, alignItems: 'center', justifyContent: 'center' },
-  emptyTitle: { marginTop: 12, fontSize: 18, fontWeight: '700', textAlign: 'center' },
-  emptyText: { marginTop: 7, fontSize: 14, lineHeight: 21, textAlign: 'center' },
+  content: { paddingHorizontal: 16, paddingBottom: 32 }, header: { paddingTop: 14, paddingBottom: 14 }, titleRow: { flexDirection: 'row', alignItems: 'center' }, titleCopy: { flex: 1 }, title: { fontSize: 32, lineHeight: 39, fontWeight: '800' }, subtitle: { marginTop: 3, fontSize: 14, lineHeight: 20 }, settingsButton: { width: 48, height: 48, borderRadius: 16, alignItems: 'center', justifyContent: 'center' },
+  search: { minHeight: 52, marginTop: 18, borderWidth: StyleSheet.hairlineWidth, borderRadius: 17, paddingHorizontal: 13, flexDirection: 'row', alignItems: 'center' }, searchInput: { flex: 1, minHeight: 50, marginLeft: 9, fontSize: 15 }, clearButton: { width: 44, height: 44, alignItems: 'center', justifyContent: 'center' },
+  filters: { gap: 8, paddingTop: 12 }, filter: { minHeight: 44, borderWidth: StyleSheet.hairlineWidth, borderRadius: 14, paddingHorizontal: 14, alignItems: 'center', justifyContent: 'center' }, filterText: { fontSize: 13, fontWeight: '700' }, sectionTitle: { marginTop: 20, fontSize: 20, lineHeight: 27, fontWeight: '700' },
+  message: { minHeight: 94, borderWidth: StyleSheet.hairlineWidth, borderRadius: 18, padding: 12, flexDirection: 'row', alignItems: 'center', overflow: 'hidden' }, avatar: { width: 44, height: 44, borderRadius: 15, alignItems: 'center', justifyContent: 'center' }, avatarText: { fontSize: 18, fontWeight: '800' }, messageBody: { flex: 1, marginLeft: 11 }, messageTop: { flexDirection: 'row', gap: 8 }, sender: { flex: 1, fontSize: 14, fontWeight: '600' }, messageTime: { fontSize: 12 }, subject: { marginTop: 2, fontSize: 14, fontWeight: '500' }, preview: { marginTop: 3, fontSize: 13, lineHeight: 18 }, unreadText: { fontWeight: '800' }, unread: { width: 8, height: 8, borderRadius: 4, marginLeft: 8 }, separator: { height: 9 },
+  empty: { minHeight: 240, marginTop: 4, borderRadius: 22, padding: 28, alignItems: 'center', justifyContent: 'center' }, emptyTitle: { marginTop: 12, fontSize: 18, fontWeight: '700', textAlign: 'center' }, emptyText: { marginTop: 7, fontSize: 14, lineHeight: 21, textAlign: 'center' }, connectButton: { minHeight: 50, marginTop: 18, borderRadius: 16, paddingHorizontal: 18, alignItems: 'center', justifyContent: 'center' }, connectText: { fontSize: 15, fontWeight: '700' },
 });

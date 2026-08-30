@@ -101,13 +101,16 @@ async function nativeOnly() {
   if (Platform.OS === 'web') throw new Error('Защищённая синхронизация доступна в приложении iOS или Android');
 }
 
-async function request<T>(url: string, init: RequestInit): Promise<T> {
-  const controller = new AbortController(); const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+async function request<T>(url: string, init: RequestInit, timeoutMs = REQUEST_TIMEOUT_MS): Promise<T> {
+  const controller = new AbortController(); const timeout = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const response = await fetch(url, { ...init, signal: controller.signal, headers: { 'content-type': 'application/json', ...init.headers } });
     if (!response.ok) {
       if (response.status === 401) throw new Error('Сервер отклонил авторизацию устройства');
       if (response.status === 429) throw new Error('Слишком много запросов. Попробуйте позже');
+      if (response.status === 404) throw new Error('Запрошенные данные не найдены');
+      if (response.status === 422) throw new Error('Почтовый сервер отклонил подключение');
+      if (response.status === 503) throw new Error('Почтовый коннектор не настроен на сервере');
       throw new Error('Сервер синхронизации временно недоступен');
     }
     if (response.status === 204) return undefined as T;
@@ -116,6 +119,17 @@ async function request<T>(url: string, init: RequestInit): Promise<T> {
     if (error instanceof Error && error.name === 'AbortError') throw new Error('Сервер не ответил вовремя');
     throw error;
   } finally { clearTimeout(timeout); }
+}
+
+export async function authenticatedRequest<T>(path: string, init: RequestInit = {}) {
+  await nativeOnly();
+  const configuration = await getSyncConfiguration();
+  if (!configuration) throw new Error('Сначала подключите мобильное приложение к DayDesk Sync');
+  if (!path.startsWith('/v1/')) throw new Error('Некорректный путь API');
+  return request<T>(`${configuration.apiUrl}${path}`, {
+    ...init,
+    headers: { authorization: `Bearer ${configuration.deviceToken}`, 'x-device-id': configuration.deviceId, ...init.headers },
+  }, path.startsWith('/v1/mail/') ? 60_000 : REQUEST_TIMEOUT_MS);
 }
 
 export async function getSyncConfiguration(): Promise<SyncConfiguration | undefined> {
